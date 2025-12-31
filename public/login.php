@@ -14,6 +14,97 @@ if (is_logged_in()) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Login - <?= htmlspecialchars(APP_NAME) ?></title>
     <link rel="stylesheet" href="styles/main.css" />
+    <style>
+        /* Additional inline styles for any immediate improvements */
+        .login-form {
+            animation: fadeInUp 0.6s ease-out;
+        }
+        
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        .form-group input::placeholder {
+            color: #9ca3af;
+            transition: color 0.3s ease;
+        }
+        
+        .form-group input:focus::placeholder {
+            color: #6b7280;
+        }
+    </style>
+</head>
+<body class="login-container">
+    <form class="login-card login-form" onsubmit="login(event)">
+        <div class="login-header">
+            <div class="login-icon">
+                <img src="<?= htmlspecialchars(APP_LOGO_URL) ?>" alt="logo" onerror="this.style.display='none'" />
+            </div>
+            <h1><?= htmlspecialchars(APP_NAME) ?></h1>
+            <p class="login-subtitle">Secure Access Portal</p>
+        </div>
+
+        <div class="login-tabs">
+            <button type="button" id="tab-staff" class="login-tab" onclick="setTab('staff')">
+                <span>Staff Login</span>
+            </button>
+            <button type="button" id="tab-student" class="login-tab" onclick="setTab('student')">
+                <span>Student / Non‑Staff</span>
+            </button>
+        </div>
+
+        <div id="error" class="login-error"></div>
+
+        <div class="form-group">
+            <label for="username">Username</label>
+            <input id="username" autocomplete="username" required placeholder="Enter your username" />
+        </div>
+        <div class="form-group">
+            <label for="password">Password</label>
+            <div class="password-field">
+                <input id="password" type="password" autocomplete="current-password" required placeholder="Enter your password" />
+                <button type="button" class="toggle-eye" aria-label="Toggle password" onclick="togglePassword('password', this)" title="Show/Hide">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+                </button>
+            </div>
+        </div>
+
+        <div class="checkbox-item" id="rememberRow" style="display:none;">
+            <input id="remember" type="checkbox" />
+            <label for="remember">Remember me for 30 days</label>
+        </div>
+        <div id="registerRow" class="text-center" style="display:none;">
+            <span style="font-size:14px; color:#6b7280;">Don't have an account?</span>
+            <a href="register.php" style="font-size:14px; font-weight:600;"> Register here</a>
+        </div>
+
+        <button class="btn btn-primary btn-full" type="submit">
+            Sign In
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="margin-left: 8px;">
+                <path d="M5 12H19M19 12L12 5M19 12L12 19" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+        </button>
+
+        <div id="twofa" class="form-group" style="display:none; margin-top:8px;">
+            <label for="code">Enter 2FA code sent to your email</label>
+            <input id="code" placeholder="123456" maxlength="6" pattern="[0-9]*" inputmode="numeric" />
+            <div class="mt-4">
+                <button class="btn btn-primary btn-full" onclick="verify2fa(event)">Verify & Continue</button>
+            </div>
+        </div>
+
+        <div class="login-footer">
+            <span>Need help? <a href="mailto:support@<?= htmlspecialchars(strtolower(APP_NAME)) ?>.com">Contact Support</a></span>
+        </div>
+    </form>
+
     <script>
         let currentTab = (new URLSearchParams(location.search).get('tab')) || 'staff';
         function setTab(tab){
@@ -72,59 +163,25 @@ if (is_logged_in()) {
             const show = el.type === 'password';
             el.type = show ? 'text' : 'password';
             btn.setAttribute('aria-pressed', show ? 'true' : 'false');
+            // Add visual feedback
+            btn.style.transform = show ? 'translateY(-50%) scale(1.2)' : 'translateY(-50%) scale(1)';
+            setTimeout(() => {
+                btn.style.transform = 'translateY(-50%)';
+            }, 200);
         }
-        window.addEventListener('DOMContentLoaded',()=> setTab(currentTab));
+        window.addEventListener('DOMContentLoaded',()=> {
+            setTab(currentTab);
+            // Add focus animation to inputs
+            const inputs = document.querySelectorAll('input');
+            inputs.forEach(input => {
+                input.addEventListener('focus', function() {
+                    this.parentElement.classList.add('focused');
+                });
+                input.addEventListener('blur', function() {
+                    this.parentElement.classList.remove('focused');
+                });
+            });
+        });
     </script>
-</head>
-<body class="login-container">
-    <form class="login-card login-form" onsubmit="login(event)">
-        <div class="login-header">
-            <div class="login-icon">
-                <img src="<?= htmlspecialchars(APP_LOGO_URL) ?>" alt="logo" onerror="this.style.display='none'" />
-            </div>
-            <h1><?= htmlspecialchars(APP_NAME) ?></h1>
-        </div>
-
-        <div class="login-tabs">
-            <button type="button" id="tab-staff" class="login-tab" onclick="setTab('staff')">Staff</button>
-            <button type="button" id="tab-student" class="login-tab" onclick="setTab('student')">Student / Non‑Staff</button>
-        </div>
-
-        <div id="error" class="login-error"></div>
-
-        <div class="form-group">
-            <label for="username">Username</label>
-            <input id="username" autocomplete="username" required />
-        </div>
-        <div class="form-group">
-            <label for="password">Password</label>
-            <div class="password-field">
-                <input id="password" type="password" autocomplete="current-password" required />
-                <button type="button" class="toggle-eye" aria-label="Toggle password" onclick="togglePassword('password', this)" title="Show/Hide">
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12Z"/><circle cx="12" cy="12" r="3"/></svg>
-                </button>
-            </div>
-        </div>
-
-        <div class="checkbox-item" id="rememberRow" style="display:none;">
-            <input id="remember" type="checkbox" />
-            <label for="remember">Remember me for 30 days</label>
-        </div>
-        <div id="registerRow" class="text-center" style="display:none; font-size:12px; color:#6b7280;">
-            Don’t have an account? <a href="register.php">Register</a>
-        </div>
-
-        <button class="btn btn-primary btn-full" type="submit">Sign In</button>
-
-        <div id="twofa" class="form-group" style="display:none; margin-top:8px;">
-            <label for="code">Enter 2FA code sent to your email</label>
-            <input id="code" placeholder="123456" />
-            <div class="mt-4">
-                <button class="btn btn-primary btn-full" onclick="verify2fa(event)">Verify</button>
-            </div>
-        </div>
-
-        <!-- The demo accounts section has been removed to avoid exposing sample credentials -->
-    </form>
 </body>
 </html>

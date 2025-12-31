@@ -34,43 +34,24 @@ $user = current_user();
                 $role = $user['role'];
                 $items = [
                     ['Dashboard','dashboard.php','fa-gauge',['admin','librarian','assistant','student','non_staff']],
-                    // Replaced Patrons with Top Users.  This module shows users with highest borrow counts
-                    ['Top Users','top_users.php','fa-users',['admin','librarian','assistant']],
-                    // Profile module now contains sub-menus for profile details and password change
-                    ['Profile','profile_details.php','fa-user',['admin','librarian','assistant','student','non_staff']],
-                    // Additional modules for extended functionality
-                    ['Student Information','student_information.php','fa-user-graduate',['admin','librarian','assistant']],
                     ['Manage Books','manage_books.php','fa-book',['admin','librarian','assistant']],
-                    // Issue Books module removed per requirements
-                    // ['Issue Books','issue_books.php','fa-book-open',['admin','librarian','assistant']],
-                    ['E‑Books','ebooks.php','fa-book-open-reader',['admin','librarian','assistant','student','non_staff']],
-                    ['Analytics','reports_analytics.php','fa-chart-line',['admin','librarian']],
-                    ['Manage User','manage_user.php','fa-users',['admin','librarian','assistant']],
-                    // Students and non‑teaching staff modules
-                    // Rename "My Issued Books" to "My Borrowed Books" and link to the new
-                    // page.  Students and non‑staff should see their borrowed
-                    // books history here.
+                    ['Library Map','library_map.php','fa-map',['admin','librarian','assistant','student','non_staff']],
                     ['My Borrowed Books','my_borrowed_books.php','fa-user-clock',['student','non_staff']],
-                    // Provide a simple catalogue view for students to browse books
                     ['Books','books.php','fa-book',['student','non_staff']],
-                    // Allow students to request a book reservation
                     ['Request Book','request_book.php','fa-book-medical',['student','non_staff']],
-                    // Staff modules
-                    // Rename the "Issued Books" module to "Borrowed Books" for staff.  The
-                    // underlying functionality remains the same but the label now
-                    // reflects the terminology used throughout the application.
                     ['Borrowed Books','issued_books.php','fa-file-lines',['admin','librarian','assistant']],
-                    // All staff can view requested books; replaces Clearances
                     ['View Requested Books','view_requested_books.php','fa-eye',['admin','librarian','assistant']],
-                    // Staff can manage e‑book access requests.  This module lists
-                    // all pending and processed e‑book access requests from
-                    // students and non‑teaching staff.
+                    ['E‑Books','ebooks.php','fa-book-open-reader',['admin','librarian','assistant','student','non_staff']],
                     ['E‑Book Requests','ebook_requests.php','fa-book-open',['admin','librarian','assistant']],
-                    ['Send Message To User','send_message.php','fa-envelope',['admin','librarian','assistant']],
-                    // Students and non‑staff can message an administrator directly via
-                    // this new module.  It appears only for these roles.
+                    ['Top Users','top_users.php','fa-users',['admin','librarian','assistant']],
+                    ['Student Information','student_information.php','fa-user-graduate',['admin','librarian','assistant']],
+                    ['Manage User','manage_user.php','fa-users',['admin','librarian','assistant']],
                     ['Message Admin','send_message_admin.php','fa-comment',['student','non_staff']],
+                    ['Analytics','reports_analytics.php','fa-chart-line',['admin','librarian']],
                     ['Audit Logs','audit.php','fa-shield-halved',['admin','librarian','assistant']],
+                    ['Profile','profile_details.php','fa-user',['admin','librarian','assistant','student','non_staff']],
+                      ['Send Message To User','send_message.php','fa-envelope',['admin','librarian','assistant']],
+               
                 ];
                 // Determine the current request URI (including query) for accurate active highlighting.
                 $curr = $_SERVER['REQUEST_URI'] ?? '';

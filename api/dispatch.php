@@ -66,7 +66,7 @@ $RESOURCES = [
     ],
     'books' => [
         'table' => 'books',
-        'fields' => ['title','author','isbn','category','publisher','year_published','total_copies','available_copies','description','is_active'],
+        'fields' => ['title','author','isbn','category','category_id','publisher','year_published','description','is_active','total_copies_cache','available_copies_cache'],
         'defaults' => ['is_active' => 1],
     ],
     'ebooks' => [
@@ -310,6 +310,14 @@ switch ($method) {
     case 'POST':
         require_csrf();
         $data = read_json_body();
+        
+        // For books resource, handle initial_copies separately
+        $initial_copies_data = null;
+        if ($resource === 'books' && isset($data['initial_copies'])) {
+            $initial_copies_data = $data['initial_copies'];
+            unset($data['initial_copies']); // Remove from main data
+        }
+        
         // Remove null values so that database defaults (e.g., CURRENT_TIMESTAMP) are used
         if (is_array($data)) {
             $data = array_filter($data, function ($v) {
@@ -411,6 +419,83 @@ switch ($method) {
         $stmt = $pdo->prepare($sql);
         $stmt->execute(array_combine($params, array_values($insert)));
         $newId = (int)$pdo->lastInsertId();
+        
+        // SPECIAL HANDLING FOR BOOKS: Create initial copies if provided
+        if ($resource === 'books' && $initial_copies_data && $initial_copies_data['count'] > 0) {
+            try {
+                $pdo->beginTransaction();
+                
+                $count = (int)$initial_copies_data['count'];
+                $condition = $initial_copies_data['condition'] ?? 'good';
+                $notes = $initial_copies_data['notes'] ?? '';
+                
+                // Get the book title for copy number prefix
+                $bookStmt = $pdo->prepare("SELECT title FROM books WHERE id = ?");
+                $bookStmt->execute([$newId]);
+                $book = $bookStmt->fetch();
+                
+                if ($book) {
+                    $prefix = strtoupper(substr($book['title'], 0, 3));
+                    
+                    // Find the highest copy number for this book
+                    $stmt = $pdo->prepare("SELECT MAX(CAST(SUBSTRING(copy_number, LENGTH(?)+1) AS UNSIGNED)) as max_num 
+                                          FROM book_copies 
+                                          WHERE book_id = ? AND copy_number LIKE ?");
+                    $stmt->execute([$prefix, $newId, $prefix . '%']);
+                    $result = $stmt->fetch();
+                    $start_num = $result['max_num'] ? $result['max_num'] + 1 : 1;
+                    
+                    // Generate copies
+                    for ($i = 0; $i < $count; $i++) {
+                        $copy_number = $prefix . str_pad($start_num + $i, 3, '0', STR_PAD_LEFT);
+                        $barcode = 'LIB-' . $newId . '-' . str_pad($start_num + $i, 3, '0', STR_PAD_LEFT);
+                        
+                        $stmt = $pdo->prepare("
+                            INSERT INTO book_copies 
+                            (book_id, copy_number, barcode, status, book_condition, notes, is_active)
+                            VALUES (?, ?, ?, 'available', ?, ?, 1)
+                        ");
+                        
+                        $stmt->execute([
+                            $newId,
+                            $copy_number,
+                            $barcode,
+                            $condition,
+                            $notes
+                        ]);
+                        
+                        $copy_id = $pdo->lastInsertId();
+                        
+                        // Log the transaction
+                        $stmt = $pdo->prepare("
+                            INSERT INTO copy_transactions 
+                            (book_copy_id, transaction_type, from_status, to_status, notes)
+                            VALUES (?, 'acquired', NULL, 'available', ?)
+                        ");
+                        $stmt->execute([$copy_id, 'New copy added: ' . $notes]);
+                    }
+                }
+                
+                $pdo->commit();
+                
+                // Update the book's cache counts
+                $updateStmt = $pdo->prepare("
+                    UPDATE books 
+                    SET total_copies_cache = (SELECT COUNT(*) FROM book_copies WHERE book_id = ?),
+                        available_copies_cache = (SELECT COUNT(*) FROM book_copies WHERE book_id = ? AND status = 'available')
+                    WHERE id = ?
+                ");
+                $updateStmt->execute([$newId, $newId, $newId]);
+                
+            } catch (Exception $e) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                // Continue anyway - the book was created, just log the error
+                error_log("Failed to create initial copies: " . $e->getMessage());
+            }
+        }
+        
         $stmt = $pdo->prepare('SELECT * FROM ' . $conf['table'] . ' WHERE id = :id');
         $stmt->execute([':id' => $newId]);
         $row = $stmt->fetch();
