@@ -113,6 +113,10 @@ $categories = $categories_stmt->fetchAll(PDO::FETCH_ASSOC);
 $book_categories_stmt = $pdo->query("SELECT DISTINCT category FROM books WHERE category IS NOT NULL AND category != '' ORDER BY category");
 $book_categories = $book_categories_stmt->fetchAll(PDO::FETCH_ASSOC);
 
+// Get library map configuration for slot validation
+$library_map_stmt = $pdo->query("SELECT * FROM library_map_config WHERE is_active = 1 ORDER BY section");
+$library_map = $library_map_stmt->fetchAll(PDO::FETCH_ASSOC);
+
 include __DIR__ . '/_header.php';
 ?>
 
@@ -172,150 +176,24 @@ include __DIR__ . '/_header.php';
             </div>
         </div>
     </div>
+
+
     <!-- AI Recommendations Section -->
-<div class="card">
-    <div class="card-header">
-        <h3>
-            <i class="fa fa-robot"></i>
-            AI Location Recommendations
-            <span class="badge" id="aiRecommendationCount">0</span>
-        </h3>
-    </div>
-    <div class="card-body">
-        <div id="aiRecommendations">
-            <div class="loading">Loading AI recommendations...</div>
+    <div class="card">
+        <div class="card-header">
+            <h3>
+                <i class="fa fa-robot"></i>
+                AI Location Recommendations
+                <span class="badge" id="aiRecommendationCount">0</span>
+            </h3>
+        </div>
+        <div class="card-body">
+            <div id="aiRecommendations">
+                <div class="loading">Loading AI recommendations...</div>
+            </div>
         </div>
     </div>
-</div>
-
-<script>
-// Load AI recommendations
-async function loadAIRecommendations() {
-    try {
-        const response = await fetch('../api/ai_recommendations.php?action=recommend');
-        if (!response.ok) throw new Error('Failed to load AI recommendations');
-        
-        const recommendations = await response.json();
-        
-        let html = '';
-        if (recommendations.length === 0) {
-            html = '<div class="empty-state"><p>No AI recommendations needed - all books have locations!</p></div>';
-        } else {
-            html = `
-                <div class="table-responsive">
-                    <table class="data-table">
-                        <thead>
-                            <tr>
-                                <th>Book</th>
-                                <th>Recommended Location</th>
-                                <th>Status</th>
-                                <th>Action</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-            `;
-            
-            recommendations.forEach(rec => {
-                html += `
-                    <tr>
-                        <td>
-                            <strong>${escapeHtml(rec.title)}</strong><br>
-                            <small>${escapeHtml(rec.author)}</small>
-                        </td>
-                        <td>
-                            <span class="location-badge">
-                                ${rec.ai_location || 'Not set'}
-                            </span>
-                        </td>
-                        <td>
-                            <span class="badge badge-warning">
-                                <i class="fa fa-robot"></i> AI Recommended
-                            </span>
-                        </td>
-                        <td>
-                            <button class="btn btn-sm btn-primary" onclick="applyBookLocation(${rec.book_id})">
-                                <i class="fa fa-check"></i> Apply
-                            </button>
-                            <a href="library_map.php" class="btn btn-sm btn-outline">
-                                <i class="fa fa-map"></i> View Map
-                            </a>
-                        </td>
-                    </tr>
-                `;
-            });
-            
-            html += `</tbody></table></div>`;
-        }
-        
-        document.getElementById('aiRecommendations').innerHTML = html;
-        document.getElementById('aiRecommendationCount').textContent = recommendations.length;
-        
-    } catch (error) {
-        console.error('Error loading AI recommendations:', error);
-        document.getElementById('aiRecommendations').innerHTML = 
-            `<div class="error">Error loading recommendations: ${error.message}</div>`;
-    }
-}
-
-// Apply AI location to a book
-async function applyBookLocation(bookId) {
-    try {
-        // Get AI recommendation for this book
-        const response = await fetch(`../api/ai_recommendations.php?action=recommend&book_id=${bookId}`);
-        if (!response.ok) throw new Error('Failed to get recommendation');
-        
-        const recommendation = await response.json();
-        
-        if (!recommendation.ai_location) {
-            alert('No AI recommendation available for this book');
-            return;
-        }
-        
-        if (confirm(`Apply AI recommendation: ${recommendation.ai_location}?`)) {
-            // Get all copies of this book
-            const copiesResponse = await fetch(`../api/book_copies.php?book_id=${bookId}`);
-            if (!copiesResponse.ok) throw new Error('Failed to fetch copies');
-            
-            const copies = await copiesResponse.json();
-            
-            const csrf = sessionStorage.getItem('csrf') || '';
-            let applied = 0;
-            
-            for (const copy of copies) {
-                if (!copy.current_section) {
-                    const locationResponse = await fetch('../api/ai_recommendations.php', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'X-CSRF-Token': csrf
-                        },
-                        body: JSON.stringify({
-                            copy_id: copy.id,
-                            section: recommendation.default_section || 'A',
-                            shelf: recommendation.shelf_recommendation || 1,
-                            row: recommendation.row_recommendation || 1,
-                            slot: recommendation.slot_recommendation || 1
-                        })
-                    });
-                    
-                    if (locationResponse.ok) {
-                        applied++;
-                    }
-                }
-            }
-            
-            alert(`Applied locations to ${applied} copies`);
-            loadAIRecommendations(); // Refresh the list
-        }
-        
-    } catch (error) {
-        alert('Error applying location: ' + error.message);
-    }
-}
-
-// Load AI recommendations when page loads
-document.addEventListener('DOMContentLoaded', loadAIRecommendations);
-</script>
+    
 
     <!-- Filter Section -->
     <div class="filter-section">
@@ -401,7 +279,7 @@ document.addEventListener('DOMContentLoaded', loadAIRecommendations);
                 <table class="data-table">
                     <thead>
                         <tr>
-                            <th>ID</th>
+                            <th>Cover</th>
                             <th>Title</th>
                             <th>Author</th>
                             <th>ISBN</th>
@@ -426,6 +304,10 @@ document.addEventListener('DOMContentLoaded', loadAIRecommendations);
                                                 ($available_copies < 3 ? 'status-low' : 'status-available');
                             $availability_text = $available_copies == 0 ? 'Out of Stock' : 
                                                 ($available_copies < 3 ? 'Low Stock' : 'Available');
+                            
+                            // Check for cover image
+                            $cover_image = $book['cover_image_cache'] ?? $book['cover_image'] ?? null;
+                            $cover_url = $cover_image ? '../uploads/covers/' . htmlspecialchars($cover_image) : '../assets/images/default-book-cover.jpg';
                         ?>
                             <tr data-id="<?= (int)$book['id'] ?>"
                                 data-title="<?= htmlspecialchars($book['title'] ?? '') ?>"
@@ -435,8 +317,16 @@ document.addEventListener('DOMContentLoaded', loadAIRecommendations);
                                 data-category="<?= htmlspecialchars($book['category'] ?? '') ?>"
                                 data-publisher="<?= htmlspecialchars($book['publisher'] ?? '') ?>"
                                 data-year="<?= (int)($book['year_published'] ?? 0) ?>"
-                                data-description="<?= htmlspecialchars($book['description'] ?? '') ?>">
-                                <td><?= (int)$book['id'] ?></td>
+                                data-description="<?= htmlspecialchars($book['description'] ?? '') ?>"
+                                data-cover-image="<?= htmlspecialchars($cover_image ?? '') ?>">
+                                <td class="text-center">
+                                    <div class="book-cover-container">
+                                        <img src="<?= $cover_url ?>" 
+                                             alt="Book Cover" 
+                                             class="book-cover-preview"
+                                             onerror="this.src='../assets/images/default-book-cover.jpg'">
+                                    </div>
+                                </td>
                                 <td>
                                     <div class="book-title">
                                         <strong><?= htmlspecialchars($book['title'] ?? '') ?></strong>
@@ -564,7 +454,7 @@ document.addEventListener('DOMContentLoaded', loadAIRecommendations);
 
 <!-- Add/Edit Book Modal -->
 <div id="bookModal" class="modal">
-    <div class="modal-content">
+    <div class="modal-content modal-lg">
         <div class="modal-header">
             <h3 id="bookModalTitle">
                 <i class="fa fa-book"></i>
@@ -575,8 +465,44 @@ document.addEventListener('DOMContentLoaded', loadAIRecommendations);
             </button>
         </div>
         <div class="modal-body">
-            <form id="bookForm">
+            <form id="bookForm" enctype="multipart/form-data">
                 <input type="hidden" id="bookId" />
+                <input type="hidden" id="existingCoverImage" />
+                
+                <div class="form-grid">
+                    <div class="form-group full-width">
+                        <div class="cover-image-section">
+                            <div class="cover-preview-container">
+                                <img id="coverPreview" src="assets/asd.jpg" 
+                                     alt="Cover Preview" 
+                                     class="cover-preview">
+                                <div class="cover-preview-overlay">
+                                    <label for="coverImage" class="btn btn-sm btn-outline">
+                                        <i class="fa fa-camera"></i>
+                                        Change Cover
+                                    </label>
+                                </div>
+                            </div>
+                            <input type="file" 
+                                   id="coverImage" 
+                                   name="cover_image"
+                                   accept="image/*"
+                                   style="display: none;"
+                                   onchange="previewCover(event)">
+                            <div class="cover-info">
+                                <label for="coverImage">
+                                    <i class="fa fa-image"></i>
+                                    Book Cover Image
+                                </label>
+                                <p class="text-muted small">
+                                    Recommended: 300x450px, JPG/PNG/WebP<br>
+                                    Max size: 2MB
+                                </p>
+                                <div id="coverError" class="text-danger small" style="display: none;"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
                 
                 <div class="form-grid">
                     <div class="form-group">
@@ -949,7 +875,7 @@ document.addEventListener('DOMContentLoaded', loadAIRecommendations);
                             <i class="fa fa-map-marker"></i>
                             Section
                         </label>
-                        <select id="editSection" class="form-control">
+                        <select id="editSection" class="form-control" onchange="checkSlotAvailability()">
                             <option value="">Select Section</option>
                             <option value="A">A</option>
                             <option value="B">B</option>
@@ -965,7 +891,7 @@ document.addEventListener('DOMContentLoaded', loadAIRecommendations);
                             <i class="fa fa-layer-group"></i>
                             Shelf (1-5)
                         </label>
-                        <select id="editShelf" class="form-control">
+                        <select id="editShelf" class="form-control" onchange="checkSlotAvailability()">
                             <option value="">Select Shelf</option>
                             <option value="1">1</option>
                             <option value="2">2</option>
@@ -982,7 +908,7 @@ document.addEventListener('DOMContentLoaded', loadAIRecommendations);
                             <i class="fa fa-grip-lines"></i>
                             Row (1-6)
                         </label>
-                        <select id="editRow" class="form-control">
+                        <select id="editRow" class="form-control" onchange="checkSlotAvailability()">
                             <option value="">Select Row</option>
                             <option value="1">1</option>
                             <option value="2">2</option>
@@ -998,12 +924,13 @@ document.addEventListener('DOMContentLoaded', loadAIRecommendations);
                             <i class="fa fa-box-open"></i>
                             Slot (1-12)
                         </label>
-                        <select id="editSlot" class="form-control">
+                        <select id="editSlot" class="form-control" onchange="checkSlotAvailability()">
                             <option value="">Select Slot</option>
                             <?php for ($i = 1; $i <= 12; $i++): ?>
                                 <option value="<?= $i ?>"><?= $i ?></option>
                             <?php endfor; ?>
                         </select>
+                        <div id="slotStatus" class="small mt-1" style="display: none;"></div>
                     </div>
                 </div>
                 
@@ -1032,951 +959,1060 @@ document.addEventListener('DOMContentLoaded', loadAIRecommendations);
     </div>
 </div>
 
+<!-- Slot Occupancy Modal -->
+<div id="slotOccupancyModal" class="modal">
+    <div class="modal-content modal-lg">
+        <div class="modal-header">
+            <h3>
+                <i class="fa fa-map-marker"></i>
+                Slot Occupancy Check
+            </h3>
+            <button class="modal-close" onclick="closeSlotOccupancyModal()">
+                <i class="fa fa-times"></i>
+            </button>
+        </div>
+        <div class="modal-body">
+            <div id="slotOccupancyContent">
+                <div class="loading">Checking slot occupancy...</div>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" onclick="closeSlotOccupancyModal()">
+                <i class="fa fa-times"></i>
+                Close
+            </button>
+        </div>
+    </div>
+</div>
+
 <style>
-
-    /* AI Recommendations Styles */
-.ai-recommendations {
-    margin-top: 2rem;
-}
-
-.recommendation-card {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    color: white;
-    border-radius: 0.5rem;
-    padding: 1.5rem;
-    margin-bottom: 1rem;
-    position: relative;
-    overflow: hidden;
-}
-
-.recommendation-card::before {
-    content: '';
-    position: absolute;
-    top: -50%;
-    right: -50%;
-    width: 200%;
-    height: 200%;
-    background: radial-gradient(circle, rgba(255,255,255,0.1) 1%, transparent 20%);
-}
-
-.recommendation-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    margin-bottom: 1rem;
-    position: relative;
-    z-index: 1;
-}
-
-.recommendation-header h4 {
-    margin: 0;
-    color: white;
-}
-
-.confidence-badge {
-    background: rgba(255,255,255,0.2);
-    color: white;
-    padding: 0.25rem 0.75rem;
-    border-radius: 1rem;
-    font-size: 0.75rem;
-    backdrop-filter: blur(10px);
-}
-
-.recommendation-details {
-    position: relative;
-    z-index: 1;
-}
-
-.location-display {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5rem;
-    background: rgba(255,255,255,0.1);
-    padding: 0.75rem;
-    border-radius: 0.375rem;
-    margin: 0.5rem 0;
-    font-family: monospace;
-    font-size: 1.1rem;
-}
-
-.location-display i {
-    color: #10B981;
-}
-
-.map-visualization {
-    display: grid;
-    grid-template-columns: repeat(12, 1fr);
-    gap: 0.25rem;
-    margin: 1rem 0;
-    max-width: 400px;
-}
-
-.map-cell {
-    width: 30px;
-    height: 30px;
-    border: 1px solid rgba(255,255,255,0.2);
-    border-radius: 0.125rem;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 0.75rem;
-}
-
-.map-cell.occupied {
-    background: rgba(239, 68, 68, 0.7);
-}
-
-.map-cell.recommended {
-    background: rgba(245, 158, 11, 0.7);
-    animation: pulse 2s infinite;
-    border: 2px solid white;
-}
-
-.map-cell.available {
-    background: rgba(16, 185, 129, 0.7);
-}
-
-@keyframes pulse {
-    0% { transform: scale(1); }
-    50% { transform: scale(1.1); }
-    100% { transform: scale(1); }
-}
-
-.recommendation-actions {
-    display: flex;
-    gap: 0.5rem;
-    margin-top: 1rem;
-    position: relative;
-    z-index: 1;
-}
-
-.btn-ai {
-    background: rgba(255,255,255,0.2);
-    color: white;
-    border: 1px solid rgba(255,255,255,0.3);
-}
-
-.btn-ai:hover {
-    background: rgba(255,255,255,0.3);
-}
-
-/* Section colors for map */
-.section-A { background: #3B82F6; }
-.section-B { background: #10B981; }
-.section-C { background: #EF4444; }
-.section-D { background: #8B5CF6; }
-.section-E { background: #F59E0B; }
-.section-F { background: #EC4899; }
-
-/* Heatmap for book density */
-.heatmap-low { background: #10B981; }
-.heatmap-medium { background: #F59E0B; }
-.heatmap-high { background: #EF4444; }
-
-/* Loading animation */
-.ai-loading {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.5rem;
-    padding: 2rem;
-}
-
-.ai-loading i {
-    animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
-}
-
-
-
-
-
-/* Enhanced Styles */
-.page-header {
-    margin-bottom: 2rem;
-}
-
-.page-header h1 {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    margin-bottom: 0.5rem;
-}
-
-.subtitle {
-    color: #6b7280;
-    font-size: 0.95rem;
-}
-
-.card {
-    background: white;
-    border-radius: 0.5rem;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-    margin-bottom: 2rem;
-    overflow: hidden;
-}
-
-.card-header {
-    padding: 1rem 1.5rem;
-    border-bottom: 1px solid #e5e7eb;
-    background: #f9fafb;
-}
-
-.card-header .badge {
-    font-size: 0.75rem;
-    margin-left: 0.5rem;
-    background: #3b82f6;
-    color: white;
-    padding: 0.25rem 0.5rem;
-    border-radius: 0.25rem;
-}
-
-.card-body {
-    padding: 1.5rem;
-}
-
-.filter-section {
-    padding: 1rem 1.5rem;
-    background: #f8fafc;
-    border-bottom: 1px solid #e5e7eb;
-}
-
-.filter-form {
-    width: 100%;
-}
-
-.filter-row {
-    display: grid;
-    grid-template-columns: 2fr 1fr 1fr auto;
-    gap: 1rem;
-    align-items: end;
-}
-
-.filter-group {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-}
-
-.filter-group label {
-    font-size: 0.875rem;
-    font-weight: 500;
-    color: #374151;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-}
-
-.filter-input, .filter-select {
-    padding: 0.5rem 0.75rem;
-    border: 1px solid #d1d5db;
-    border-radius: 0.375rem;
-    font-size: 0.875rem;
-}
-
-.filter-input:focus, .filter-select:focus {
-    outline: none;
-    border-color: #3b82f6;
-    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
-}
-
-.book-title {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-}
-
-.isbn-badge, .category-badge {
-    display: inline-block;
-    padding: 0.25rem 0.5rem;
-    background: #e0f2fe;
-    color: #0369a1;
-    border-radius: 0.25rem;
-    font-size: 0.75rem;
-    font-family: monospace;
-}
-
-.category-badge {
-    background: #f3e8ff;
-    color: #7c3aed;
-}
-
-.status-available {
-    background: #dcfce7;
-    color: #166534;
-}
-
-.status-low {
-    background: #fef3c7;
-    color: #92400e;
-}
-
-.status-unavailable {
-    background: #fee2e2;
-    color: #991b1b;
-}
-
-.action-buttons {
-    display: flex;
-    gap: 0.5rem;
-    justify-content: center;
-}
-
-.btn-icon {
-    width: 2rem;
-    height: 2rem;
-    border: none;
-    border-radius: 0.375rem;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    transition: all 0.2s;
-}
-
-.btn-view {
-    background: #dbeafe;
-    color: #1d4ed8;
-}
-
-.btn-view:hover {
-    background: #bfdbfe;
-}
-
-.btn-edit {
-    background: #fef3c7;
-    color: #92400e;
-}
-
-.btn-edit:hover {
-    background: #fde68a;
-}
-
-.btn-copy {
-    background: #d1fae5;
-    color: #065f46;
-}
-
-.btn-copy:hover {
-    background: #a7f3d0;
-}
-
-.btn-delete {
-    background: #fee2e2;
-    color: #dc2626;
-}
-
-.btn-delete:hover {
-    background: #fecaca;
-}
-
-.pagination {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 1rem;
-    margin-top: 2rem;
-    padding-top: 1.5rem;
-    border-top: 1px solid #e5e7eb;
-}
-
-.pagination-info {
-    color: #6b7280;
-    font-size: 0.875rem;
-}
-
-.pagination-controls {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-}
-
-.page-numbers {
-    display: flex;
-    gap: 0.25rem;
-}
-
-.page-number {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 2rem;
-    height: 2rem;
-    padding: 0 0.5rem;
-    border: 1px solid #d1d5db;
-    border-radius: 0.375rem;
-    color: #374151;
-    text-decoration: none;
-    font-size: 0.875rem;
-    transition: all 0.2s;
-}
-
-.page-number:hover {
-    background: #f9fafb;
-}
-
-.page-number.active {
-    background: #3b82f6;
-    color: white;
-    border-color: #3b82f6;
-}
-
-.page-dots {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 2rem;
-    height: 2rem;
-    color: #6b7280;
-}
-
-.summary-stats {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 1rem;
-    margin-bottom: 2rem;
-}
-
-.stat-item {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-    padding: 1rem;
-    background: white;
-    border-radius: 0.5rem;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-}
-
-.stat-item i {
-    font-size: 1.5rem;
-    color: #3b82f6;
-}
-
-.stat-item h4 {
-    margin: 0;
-    font-size: 1.5rem;
-    color: #1f2937;
-}
-
-.stat-item span {
-    font-size: 0.875rem;
-    color: #6b7280;
-}
-
-.empty-state {
-    text-align: center;
-    padding: 3rem 1rem;
-}
-
-.empty-icon {
-    font-size: 3rem;
-    color: #9ca3af;
-    margin-bottom: 1rem;
-}
-
-.empty-state h3 {
-    color: #374151;
-    margin-bottom: 0.5rem;
-}
-
-.empty-state p {
-    color: #6b7280;
-    max-width: 24rem;
-    margin: 0 auto;
-}
-
-.modal {
-    display: none;
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: rgba(0,0,0,0.5);
-    align-items: center;
-    justify-content: center;
-    z-index: 1000;
-    padding: 20px;
-}
-
-.modal-content {
-    background: white;
-    border-radius: 0.5rem;
-    width: 100%;
-    max-width: 600px;
-    max-height: 90vh;
-    overflow: hidden;
-    box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1);
-    display: flex;
-    flex-direction: column;
-}
-
-.modal-lg {
-    max-width: 900px;
-}
-
-.modal-header {
-    padding: 1.5rem;
-    border-bottom: 1px solid #e5e7eb;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    flex-shrink: 0;
-}
-
-.modal-header h3 {
-    margin: 0;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-}
-
-.modal-close {
-    background: none;
-    border: none;
-    font-size: 1.25rem;
-    color: #6b7280;
-    cursor: pointer;
-    padding: 0.25rem;
-}
-
-.modal-close:hover {
-    color: #374151;
-}
-
-.modal-body {
-    padding: 1.5rem;
-    overflow-y: auto;
-    flex: 1;
-}
-
-.modal-footer {
-    padding: 1rem 1.5rem;
-    border-top: 1px solid #e5e7eb;
-    display: flex;
-    justify-content: flex-end;
-    gap: 0.75rem;
-    flex-shrink: 0;
-    background: #f9fafb;
-}
-
-.form-grid {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 1rem;
-    margin-bottom: 1rem;
-}
-
-.form-group {
-    margin-bottom: 1rem;
-}
-
-.form-group label {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    margin-bottom: 0.5rem;
-    font-weight: 500;
-    color: #374151;
-}
-
-.form-control {
-    width: 100%;
-    padding: 0.5rem 0.75rem;
-    border: 1px solid #d1d5db;
-    border-radius: 0.375rem;
-    font-size: 0.875rem;
-}
-
-.form-control:focus {
-    outline: none;
-    border-color: #3b82f6;
-    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
-}
-
-.form-section {
-    margin-top: 1.5rem;
-    padding-top: 1.5rem;
-    border-top: 1px solid #e5e7eb;
-}
-
-.form-section h4 {
-    margin-bottom: 1rem;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-}
-
-.btn {
-    padding: 0.625rem 1.25rem;
-    border: none;
-    border-radius: 0.375rem;
-    font-size: 0.875rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.2s;
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5rem;
-    min-height: 40px;
-}
-
-.btn-primary {
-    background: #3b82f6;
-    color: white;
-}
-
-.btn-primary:hover {
-    background: #2563eb;
-}
-
-.btn-secondary {
-    background: #6b7280;
-    color: white;
-}
-
-.btn-secondary:hover {
-    background: #4b5563;
-}
-
-.btn-outline {
-    background: white;
-    color: #374151;
-    border: 1px solid #d1d5db;
-}
-
-.btn-outline:hover {
-    background: #f9fafb;
-}
-
-.btn-success {
-    background: #10b981;
-    color: white;
-}
-
-.btn-success:hover {
-    background: #059669;
-}
-
-.text-center {
-    text-align: center;
-}
-
-.text-muted {
-    color: #6b7280;
-}
-
-.text-warning {
-    color: #f59e0b;
-}
-
-.d-block {
-    display: block;
-}
-
-.flex-space-between {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-}
-
-.table-responsive {
-    overflow-x: auto;
-}
-
-.data-table {
-    width: 100%;
-    border-collapse: collapse;
-}
-
-.data-table th {
-    background: #f9fafb;
-    padding: 0.75rem 1rem;
-    text-align: left;
-    font-weight: 600;
-    color: #374151;
-    border-bottom: 1px solid #e5e7eb;
-}
-
-.data-table td {
-    padding: 0.75rem 1rem;
-    border-bottom: 1px solid #e5e7eb;
-}
-
-.data-table tr:hover {
-    background: #f9fafb;
-}
-
-.text-warning {
-    color: #f59e0b;
-}
-
-/* Button styles for copy actions */
-.btn-sm {
-    padding: 0.25rem 0.5rem;
-    font-size: 0.75rem;
-}
-
-/* Copy details styles */
-.copy-details {
-    padding: 1rem;
-}
-
-.copy-details-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    margin-bottom: 1.5rem;
-}
-
-.copy-details-header h4 {
-    margin: 0;
-    flex: 1;
-}
-
-.copy-details-grid {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 1rem;
-    margin-bottom: 1.5rem;
-}
-
-.copy-details-item {
-    padding: 0.75rem;
-    background: #f9fafb;
-    border-radius: 0.375rem;
-}
-
-.copy-details-item label {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-weight: 500;
-    color: #374151;
-    margin-bottom: 0.25rem;
-}
-
-.copy-details-item p {
-    margin: 0;
-    color: #6b7280;
-}
-
-.copy-details-section {
-    margin-top: 1.5rem;
-    padding-top: 1.5rem;
-    border-top: 1px solid #e5e7eb;
-}
-
-.copy-details-section h5 {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    margin-bottom: 1rem;
-}
-
-.badge {
-    display: inline-block;
-    padding: 0.25rem 0.5rem;
-    font-size: 0.75rem;
-    font-weight: 600;
-    border-radius: 9999px;
-}
-
-.badge-outline {
-    background: transparent;
-    border: 1px solid #d1d5db;
-    color: #374151;
-}
-
-.badge-outline:hover {
-    background: #f9fafb;
-}
-
-/* Copies Table Styles */
-.copies-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.875rem;
-}
-
-.copies-table th {
-    background: #f8fafc;
-    padding: 0.75rem;
-    text-align: left;
-    font-weight: 600;
-    color: #374151;
-    border-bottom: 1px solid #e5e7eb;
-}
-
-.copies-table td {
-    padding: 0.75rem;
-    border-bottom: 1px solid #e5e7eb;
-    vertical-align: top;
-}
-
-.copy-status {
-    display: inline-block;
-    padding: 0.25rem 0.5rem;
-    border-radius: 0.25rem;
-    font-size: 0.75rem;
-    font-weight: 600;
-}
-
-.status-available { background: #dcfce7; color: #166534; }
-.status-borrowed { background: #fef3c7; color: #92400e; }
-.status-reserved { background: #e0e7ff; color: #3730a3; }
-.status-lost { background: #fee2e2; color: #991b1b; }
-.status-damaged { background: #f5f5f4; color: #57534e; }
-.status-maintenance { background: #f3e8ff; color: #7c3aed; }
-
-.copy-condition {
-    display: inline-block;
-    padding: 0.125rem 0.375rem;
-    border-radius: 0.125rem;
-    font-size: 0.75rem;
-}
-
-.condition-new { background: #f0f9ff; color: #0369a1; }
-.condition-good { background: #f0fdf4; color: #166534; }
-.condition-fair { background: #fefce8; color: #854d0e; }
-.condition-poor { background: #fef2f2; color: #991b1b; }
-.condition-damaged { background: #f5f5f4; color: #57534e; }
-
-.location-badge {
-    display: inline-block;
-    padding: 0.25rem 0.5rem;
-    background: #f8fafc;
-    color: #374151;
-    border: 1px solid #e5e7eb;
-    border-radius: 0.25rem;
-    font-size: 0.75rem;
-    font-family: monospace;
-}
-
-.loading {
-    text-align: center;
-    padding: 2rem;
-    color: #6b7280;
-}
-
-.book-details {
-    padding: 1rem;
-}
-
-.detail-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    margin-bottom: 1.5rem;
-}
-
-.detail-header h4 {
-    margin: 0;
-    flex: 1;
-}
-
-.detail-grid {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 1rem;
-    margin-bottom: 1.5rem;
-}
-
-.detail-item {
-    padding: 0.75rem;
-    background: #f9fafb;
-    border-radius: 0.375rem;
-}
-
-.detail-item label {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-weight: 500;
-    color: #374151;
-    margin-bottom: 0.25rem;
-}
-
-.detail-item p {
-    margin: 0;
-    color: #6b7280;
-}
-
-.detail-section {
-    margin-top: 1.5rem;
-    padding-top: 1.5rem;
-    border-top: 1px solid #e5e7eb;
-}
-
-.detail-section h5 {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    margin-bottom: 1rem;
-}
-
-.detail-footer {
-    margin-top: 1.5rem;
-    padding-top: 1rem;
-    border-top: 1px solid #e5e7eb;
-}
-
-/* Fix modal visibility */
-.modal-footer {
-    position: relative;
-    z-index: 10;
-}
-
-.modal-footer .btn {
-    position: relative;
-    z-index: 11;
-}
-
-@media (max-width: 1024px) {
-    .filter-row {
-        grid-template-columns: 1fr 1fr;
+    /* Add slot status indicators */
+    .slot-available {
+        color: #10b981;
     }
     
-    .summary-stats {
-        grid-template-columns: repeat(2, 1fr);
+    .slot-occupied {
+        color: #ef4444;
     }
     
-    .detail-grid {
-        grid-template-columns: 1fr;
-    }
-}
-
-@media (max-width: 768px) {
-    .filter-row {
-        grid-template-columns: 1fr;
+    .slot-checking {
+        color: #f59e0b;
     }
     
-    .form-grid {
-        grid-template-columns: 1fr;
+    .mt-1 {
+        margin-top: 0.25rem;
     }
     
-    .modal-content {
-        width: 95%;
-        margin: 1rem;
+    /* Slot occupancy table styles */
+    .slot-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.875rem;
     }
     
-    .pagination-controls {
-        flex-direction: column;
+    .slot-table th {
+        background: #f8fafc;
+        padding: 0.5rem;
+        text-align: center;
+        border: 1px solid #e5e7eb;
+    }
+    
+    .slot-table td {
+        padding: 0.5rem;
+        text-align: center;
+        border: 1px solid #e5e7eb;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+    
+    .slot-table td:hover {
+        background: #f9fafb;
+    }
+    
+    .slot-empty {
+        background: #dcfce7;
+        color: #166534;
+    }
+    
+    .slot-occupied-book {
+        background: #fee2e2;
+        color: #991b1b;
+    }
+    
+    .slot-selected {
+        background: #3b82f6;
+        color: white;
+    }
+    
+    .slot-info {
+        margin-top: 1rem;
+        padding: 1rem;
+        background: #f8fafc;
+        border-radius: 0.375rem;
+        border-left: 4px solid #3b82f6;
+    }
+    
+    .slot-info h5 {
+        margin: 0 0 0.5rem 0;
+        display: flex;
+        align-items: center;
         gap: 0.5rem;
     }
     
-    .summary-stats {
-        grid-template-columns: 1fr;
+    .slot-details {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0.5rem;
+        margin-top: 0.5rem;
+    }
+    
+    .slot-details-item {
+        padding: 0.5rem;
+        background: white;
+        border-radius: 0.25rem;
+    }
+    
+    .slot-details-item label {
+        font-weight: 500;
+        color: #374151;
+        font-size: 0.75rem;
+    }
+    
+    .slot-details-item p {
+        margin: 0.25rem 0 0 0;
+        font-size: 0.875rem;
+    }
+    
+    /* Existing styles remain the same */
+    .book-cover-container {
+        width: 50px;
+        height: 70px;
+        margin: 0 auto;
+        position: relative;
+        overflow: hidden;
+        border-radius: 4px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        background: #f5f5f5;
+    }
+    
+    .book-cover-preview {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        transition: transform 0.3s ease;
+    }
+    
+    .book-cover-preview:hover {
+        transform: scale(1.05);
+    }
+    
+    .cover-image-section {
+        display: flex;
+        gap: 1.5rem;
+        align-items: flex-start;
+        margin-bottom: 1.5rem;
+        padding: 1rem;
+        background: #f8fafc;
+        border-radius: 0.5rem;
+        border: 2px dashed #d1d5db;
+    }
+    
+    .cover-preview-container {
+        position: relative;
+        width: 120px;
+        height: 180px;
+        flex-shrink: 0;
+        border-radius: 6px;
+        overflow: hidden;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+    
+    .cover-preview {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+    }
+    
+    .cover-preview-overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0,0,0,0.5);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        opacity: 0;
+        transition: opacity 0.3s ease;
+    }
+    
+    .cover-preview-container:hover .cover-preview-overlay {
+        opacity: 1;
+    }
+    
+    .cover-info {
+        flex: 1;
+    }
+    
+    .cover-info label {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 0.5rem;
+        font-weight: 600;
+        color: #374151;
+    }
+    
+    .page-header {
+        margin-bottom: 2rem;
+    }
+    
+    .page-header h1 {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 0.5rem;
+    }
+    
+    .subtitle {
+        color: #6b7280;
+        font-size: 0.95rem;
+    }
+    
+    .card {
+        background: white;
+        border-radius: 0.5rem;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        margin-bottom: 2rem;
+        overflow: hidden;
+    }
+    
+    .card-header {
+        padding: 1rem 1.5rem;
+        border-bottom: 1px solid #e5e7eb;
+        background: #f9fafb;
+    }
+    
+    .card-header .badge {
+        font-size: 0.75rem;
+        margin-left: 0.5rem;
+        background: #3b82f6;
+        color: white;
+        padding: 0.25rem 0.5rem;
+        border-radius: 0.25rem;
+    }
+    
+    .card-body {
+        padding: 1.5rem;
+    }
+    
+    .filter-section {
+        padding: 1rem 1.5rem;
+        background: #f8fafc;
+        border-bottom: 1px solid #e5e7eb;
+    }
+    
+    .filter-form {
+        width: 100%;
+    }
+    
+    .filter-row {
+        display: grid;
+        grid-template-columns: 2fr 1fr 1fr auto;
+        gap: 1rem;
+        align-items: end;
+    }
+    
+    .filter-group {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+    }
+    
+    .filter-group label {
+        font-size: 0.875rem;
+        font-weight: 500;
+        color: #374151;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    
+    .filter-input, .filter-select {
+        padding: 0.5rem 0.75rem;
+        border: 1px solid #d1d5db;
+        border-radius: 0.375rem;
+        font-size: 0.875rem;
+    }
+    
+    .filter-input:focus, .filter-select:focus {
+        outline: none;
+        border-color: #3b82f6;
+        box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+    }
+    
+    .book-title {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+    }
+    
+    .isbn-badge, .category-badge {
+        display: inline-block;
+        padding: 0.25rem 0.5rem;
+        background: #e0f2fe;
+        color: #0369a1;
+        border-radius: 0.25rem;
+        font-size: 0.75rem;
+        font-family: monospace;
+    }
+    
+    .category-badge {
+        background: #f3e8ff;
+        color: #7c3aed;
+    }
+    
+    .status-available {
+        background: #dcfce7;
+        color: #166534;
+    }
+    
+    .status-low {
+        background: #fef3c7;
+        color: #92400e;
+    }
+    
+    .status-unavailable {
+        background: #fee2e2;
+        color: #991b1b;
     }
     
     .action-buttons {
-        flex-wrap: wrap;
+        display: flex;
+        gap: 0.5rem;
+        justify-content: center;
     }
-}
+    
+    .btn-icon {
+        width: 2rem;
+        height: 2rem;
+        border: none;
+        border-radius: 0.375rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+    
+    .btn-view {
+        background: #dbeafe;
+        color: #1d4ed8;
+    }
+    
+    .btn-view:hover {
+        background: #bfdbfe;
+    }
+    
+    .btn-edit {
+        background: #fef3c7;
+        color: #92400e;
+    }
+    
+    .btn-edit:hover {
+        background: #fde68a;
+    }
+    
+    .btn-copy {
+        background: #d1fae5;
+        color: #065f46;
+    }
+    
+    .btn-copy:hover {
+        background: #a7f3d0;
+    }
+    
+    .btn-delete {
+        background: #fee2e2;
+        color: #dc2626;
+    }
+    
+    .btn-delete:hover {
+        background: #fecaca;
+    }
+    
+    .pagination {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 1rem;
+        margin-top: 2rem;
+        padding-top: 1.5rem;
+        border-top: 1px solid #e5e7eb;
+    }
+    
+    .pagination-info {
+        color: #6b7280;
+        font-size: 0.875rem;
+    }
+    
+    .pagination-controls {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+    }
+    
+    .page-numbers {
+        display: flex;
+        gap: 0.25rem;
+    }
+    
+    .page-number {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 2rem;
+        height: 2rem;
+        padding: 0 0.5rem;
+        border: 1px solid #d1d5db;
+        border-radius: 0.375rem;
+        color: #374151;
+        text-decoration: none;
+        font-size: 0.875rem;
+        transition: all 0.2s;
+    }
+    
+    .page-number:hover {
+        background: #f9fafb;
+    }
+    
+    .page-number.active {
+        background: #3b82f6;
+        color: white;
+        border-color: #3b82f6;
+    }
+    
+    .page-dots {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 2rem;
+        height: 2rem;
+        color: #6b7280;
+    }
+    
+    .summary-stats {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 1rem;
+        margin-bottom: 2rem;
+    }
+    
+    .stat-item {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        padding: 1rem;
+        background: white;
+        border-radius: 0.5rem;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    
+    .stat-item i {
+        font-size: 1.5rem;
+        color: #3b82f6;
+    }
+    
+    .stat-item h4 {
+        margin: 0;
+        font-size: 1.5rem;
+        color: #1f2937;
+    }
+    
+    .stat-item span {
+        font-size: 0.875rem;
+        color: #6b7280;
+    }
+    
+    .empty-state {
+        text-align: center;
+        padding: 3rem 1rem;
+    }
+    
+    .empty-icon {
+        font-size: 3rem;
+        color: #9ca3af;
+        margin-bottom: 1rem;
+    }
+    
+    .empty-state h3 {
+        color: #374151;
+        margin-bottom: 0.5rem;
+    }
+    
+    .empty-state p {
+        color: #6b7280;
+        max-width: 24rem;
+        margin: 0 auto;
+    }
+    
+    .modal {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0,0,0,0.5);
+        align-items: center;
+        justify-content: center;
+        z-index: 1000;
+        padding: 20px;
+    }
+    
+    .modal-content {
+        background: white;
+        border-radius: 0.5rem;
+        width: 100%;
+        max-width: 600px;
+        max-height: 90vh;
+        overflow: hidden;
+        box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1);
+        display: flex;
+        flex-direction: column;
+    }
+    
+    .modal-lg {
+        max-width: 800px;
+    }
+    
+    .modal-header {
+        padding: 1.5rem;
+        border-bottom: 1px solid #e5e7eb;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        flex-shrink: 0;
+    }
+    
+    .modal-header h3 {
+        margin: 0;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    
+    .modal-close {
+        background: none;
+        border: none;
+        font-size: 1.25rem;
+        color: #6b7280;
+        cursor: pointer;
+        padding: 0.25rem;
+    }
+    
+    .modal-close:hover {
+        color: #374151;
+    }
+    
+    .modal-body {
+        padding: 1.5rem;
+        overflow-y: auto;
+        flex: 1;
+    }
+    
+    .modal-footer {
+        padding: 1rem 1.5rem;
+        border-top: 1px solid #e5e7eb;
+        display: flex;
+        justify-content: flex-end;
+        gap: 0.75rem;
+        flex-shrink: 0;
+        background: #f9fafb;
+    }
+    
+    .form-grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 1rem;
+        margin-bottom: 1rem;
+    }
+    
+    .form-group {
+        margin-bottom: 1rem;
+    }
+    
+    .form-group.full-width {
+        grid-column: 1 / -1;
+    }
+    
+    .form-group label {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 0.5rem;
+        font-weight: 500;
+        color: #374151;
+    }
+    
+    .form-control {
+        width: 100%;
+        padding: 0.5rem 0.75rem;
+        border: 1px solid #d1d5db;
+        border-radius: 0.375rem;
+        font-size: 0.875rem;
+    }
+    
+    .form-control:focus {
+        outline: none;
+        border-color: #3b82f6;
+        box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+    }
+    
+    .form-section {
+        margin-top: 1.5rem;
+        padding-top: 1.5rem;
+        border-top: 1px solid #e5e7eb;
+    }
+    
+    .form-section h4 {
+        margin-bottom: 1rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    
+    .btn {
+        padding: 0.625rem 1.25rem;
+        border: none;
+        border-radius: 0.375rem;
+        font-size: 0.875rem;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        min-height: 40px;
+    }
+    
+    .btn-primary {
+        background: #3b82f6;
+        color: white;
+    }
+    
+    .btn-primary:hover {
+        background: #2563eb;
+    }
+    
+    .btn-secondary {
+        background: #6b7280;
+        color: white;
+    }
+    
+    .btn-secondary:hover {
+        background: #4b5563;
+    }
+    
+    .btn-outline {
+        background: white;
+        color: #374151;
+        border: 1px solid #d1d5db;
+    }
+    
+    .btn-outline:hover {
+        background: #f9fafb;
+    }
+    
+    .btn-success {
+        background: #10b981;
+        color: white;
+    }
+    
+    .btn-success:hover {
+        background: #059669;
+    }
+    
+    .text-center {
+        text-align: center;
+    }
+    
+    .text-muted {
+        color: #6b7280;
+    }
+    
+    .text-warning {
+        color: #f59e0b;
+    }
+    
+    .text-danger {
+        color: #ef4444;
+    }
+    
+    .small {
+        font-size: 0.75rem;
+    }
+    
+    .d-block {
+        display: block;
+    }
+    
+    .flex-space-between {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+    
+    .table-responsive {
+        overflow-x: auto;
+    }
+    
+    .data-table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+    
+    .data-table th {
+        background: #f9fafb;
+        padding: 0.75rem 1rem;
+        text-align: left;
+        font-weight: 600;
+        color: #374151;
+        border-bottom: 1px solid #e5e7eb;
+    }
+    
+    .data-table td {
+        padding: 0.75rem 1rem;
+        border-bottom: 1px solid #e5e7eb;
+    }
+    
+    .data-table tr:hover {
+        background: #f9fafb;
+    }
+    
+    .text-warning {
+        color: #f59e0b;
+    }
+    
+    .btn-sm {
+        padding: 0.25rem 0.5rem;
+        font-size: 0.75rem;
+    }
+    
+    .copy-details {
+        padding: 1rem;
+    }
+    
+    .copy-details-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        margin-bottom: 1.5rem;
+    }
+    
+    .copy-details-header h4 {
+        margin: 0;
+        flex: 1;
+    }
+    
+    .copy-details-grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 1rem;
+        margin-bottom: 1.5rem;
+    }
+    
+    .copy-details-item {
+        padding: 0.75rem;
+        background: #f9fafb;
+        border-radius: 0.375rem;
+    }
+    
+    .copy-details-item label {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-weight: 500;
+        color: #374151;
+        margin-bottom: 0.25rem;
+    }
+    
+    .copy-details-item p {
+        margin: 0;
+        color: #6b7280;
+    }
+    
+    .copy-details-section {
+        margin-top: 1.5rem;
+        padding-top: 1.5rem;
+        border-top: 1px solid #e5e7eb;
+    }
+    
+    .copy-details-section h5 {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 1rem;
+    }
+    
+    .badge {
+        display: inline-block;
+        padding: 0.25rem 0.5rem;
+        font-size: 0.75rem;
+        font-weight: 600;
+        border-radius: 9999px;
+    }
+    
+    .badge-outline {
+        background: transparent;
+        border: 1px solid #d1d5db;
+        color: #374151;
+    }
+    
+    .badge-outline:hover {
+        background: #f9fafb;
+    }
+    
+    .copies-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.875rem;
+    }
+    
+    .copies-table th {
+        background: #f8fafc;
+        padding: 0.75rem;
+        text-align: left;
+        font-weight: 600;
+        color: #374151;
+        border-bottom: 1px solid #e5e7eb;
+    }
+    
+    .copies-table td {
+        padding: 0.75rem;
+        border-bottom: 1px solid #e5e7eb;
+        vertical-align: top;
+    }
+    
+    .copy-status {
+        display: inline-block;
+        padding: 0.25rem 0.5rem;
+        border-radius: 0.25rem;
+        font-size: 0.75rem;
+        font-weight: 600;
+    }
+    
+    .status-available { background: #dcfce7; color: #166534; }
+    .status-borrowed { background: #fef3c7; color: #92400e; }
+    .status-reserved { background: #e0e7ff; color: #3730a3; }
+    .status-lost { background: #fee2e2; color: #991b1b; }
+    .status-damaged { background: #f5f5f4; color: #57534e; }
+    .status-maintenance { background: #f3e8ff; color: #7c3aed; }
+    
+    .copy-condition {
+        display: inline-block;
+        padding: 0.125rem 0.375rem;
+        border-radius: 0.125rem;
+        font-size: 0.75rem;
+    }
+    
+    .condition-new { background: #f0f9ff; color: #0369a1; }
+    .condition-good { background: #f0fdf4; color: #166534; }
+    .condition-fair { background: #fefce8; color: #854d0e; }
+    .condition-poor { background: #fef2f2; color: #991b1b; }
+    .condition-damaged { background: #f5f5f4; color: #57534e; }
+    
+    .location-badge {
+        display: inline-block;
+        padding: 0.25rem 0.5rem;
+        background: #f8fafc;
+        color: #374151;
+        border: 1px solid #e5e7eb;
+        border-radius: 0.25rem;
+        font-size: 0.75rem;
+        font-family: monospace;
+    }
+    
+    .loading {
+        text-align: center;
+        padding: 2rem;
+        color: #6b7280;
+    }
+    
+    .book-details {
+        padding: 1rem;
+    }
+    
+    .book-details-header {
+        display: flex;
+        gap: 1.5rem;
+        margin-bottom: 1.5rem;
+    }
+    
+    .book-details-cover {
+        flex-shrink: 0;
+        width: 160px;
+        height: 240px;
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    
+    .book-details-cover img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+    }
+    
+    .book-details-info {
+        flex: 1;
+    }
+    
+    .book-details-info h4 {
+        margin: 0 0 0.5rem 0;
+        font-size: 1.5rem;
+        color: #1f2937;
+    }
+    
+    .book-details-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 1rem;
+        margin-bottom: 1rem;
+    }
+    
+    .book-details-meta-item {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        color: #6b7280;
+        font-size: 0.875rem;
+    }
+    
+    .book-details-grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 1rem;
+        margin-bottom: 1.5rem;
+    }
+    
+    .book-details-item {
+        padding: 0.75rem;
+        background: #f9fafb;
+        border-radius: 0.375rem;
+    }
+    
+    .book-details-item label {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-weight: 500;
+        color: #374151;
+        margin-bottom: 0.25rem;
+    }
+    
+    .book-details-item p {
+        margin: 0;
+        color: #6b7280;
+    }
+    
+    .book-details-section {
+        margin-top: 1.5rem;
+        padding-top: 1.5rem;
+        border-top: 1px solid #e5e7eb;
+    }
+    
+    .book-details-section h5 {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 1rem;
+    }
+    
+    .book-details-footer {
+        margin-top: 1.5rem;
+        padding-top: 1rem;
+        border-top: 1px solid #e5e7eb;
+    }
+    
+    .modal-footer {
+        position: relative;
+        z-index: 10;
+    }
+    
+    .modal-footer .btn {
+        position: relative;
+        z-index: 11;
+    }
+    
+    @media (max-width: 1024px) {
+        .filter-row {
+            grid-template-columns: 1fr 1fr;
+        }
+        
+        .summary-stats {
+            grid-template-columns: repeat(2, 1fr);
+        }
+        
+        .book-details-grid {
+            grid-template-columns: 1fr;
+        }
+        
+        .book-details-header {
+            flex-direction: column;
+        }
+        
+        .book-details-cover {
+            width: 100%;
+            height: 300px;
+        }
+        
+        .slot-details {
+            grid-template-columns: 1fr;
+        }
+    }
+    
+    @media (max-width: 768px) {
+        .filter-row {
+            grid-template-columns: 1fr;
+        }
+        
+        .form-grid {
+            grid-template-columns: 1fr;
+        }
+        
+        .modal-content {
+            width: 95%;
+            margin: 1rem;
+        }
+        
+        .pagination-controls {
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+        
+        .summary-stats {
+            grid-template-columns: 1fr;
+        }
+        
+        .action-buttons {
+            flex-wrap: wrap;
+        }
+        
+        .cover-image-section {
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+        }
+        
+        .book-details-cover {
+            width: 100%;
+            max-width: 200px;
+            margin: 0 auto;
+        }
+    }
 </style>
 
 <script>
@@ -2027,15 +2063,420 @@ function showEditCopyModal() {
 
 function closeEditCopyModal() {
     document.getElementById('editCopyModal').style.display = 'none';
+    // Reset slot status
+    document.getElementById('slotStatus').style.display = 'none';
+    document.getElementById('slotStatus').textContent = '';
+}
+
+function showSlotOccupancyModal() {
+    document.getElementById('slotOccupancyModal').style.display = 'flex';
+}
+
+function closeSlotOccupancyModal() {
+    document.getElementById('slotOccupancyModal').style.display = 'none';
+}
+
+// Check slot availability in edit copy modal
+async function checkSlotAvailability() {
+    const section = document.getElementById('editSection').value;
+    const shelf = document.getElementById('editShelf').value;
+    const row = document.getElementById('editRow').value;
+    const slot = document.getElementById('editSlot').value;
+    const slotStatus = document.getElementById('slotStatus');
+    
+    if (!section || !shelf || !row || !slot) {
+        slotStatus.style.display = 'none';
+        return;
+    }
+    
+    // Show checking status
+    slotStatus.style.display = 'block';
+    slotStatus.innerHTML = '<i class="fa fa-spinner fa-spin"></i> Checking slot availability...';
+    slotStatus.className = 'small mt-1 slot-checking';
+    
+    try {
+        // Check if slot is occupied
+        const response = await fetch(`../api/ai_recommendations.php?action=check_slot&section=${section}&shelf=${shelf}&row=${row}&slot=${slot}`);
+        if (!response.ok) throw new Error('Failed to check slot');
+        
+        const result = await response.json();
+        
+        if (result.occupied) {
+            slotStatus.innerHTML = `<i class="fa fa-times-circle"></i> Slot occupied by: <strong>${escapeHtml(result.book_title)}</strong>`;
+            slotStatus.className = 'small mt-1 slot-occupied';
+        } else {
+            slotStatus.innerHTML = '<i class="fa fa-check-circle"></i> Slot available';
+            slotStatus.className = 'small mt-1 slot-available';
+        }
+        
+    } catch (error) {
+        slotStatus.innerHTML = `<i class="fa fa-exclamation-circle"></i> Unable to check slot: ${escapeHtml(error.message)}`;
+        slotStatus.className = 'small mt-1 slot-checking';
+    }
+}
+
+// Cover image preview
+function previewCover(event) {
+    const input = event.target;
+    const preview = document.getElementById('coverPreview');
+    const errorDiv = document.getElementById('coverError');
+    
+    if (input.files && input.files[0]) {
+        const file = input.files[0];
+        const maxSize = 2 * 1024 * 1024; // 2MB
+        const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif'];
+        
+        // Validate file type
+        if (!allowedTypes.includes(file.type)) {
+            errorDiv.textContent = 'Invalid file type. Please upload JPG, PNG, WebP or GIF.';
+            errorDiv.style.display = 'block';
+            input.value = '';
+            preview.src = '../assets/images/default-book-cover.jpg';
+            return;
+        }
+        
+        // Validate file size
+        if (file.size > maxSize) {
+            errorDiv.textContent = 'File size too large. Maximum size is 2MB.';
+            errorDiv.style.display = 'block';
+            input.value = '';
+            preview.src = '../assets/images/default-book-cover.jpg';
+            return;
+        }
+        
+        errorDiv.style.display = 'none';
+        
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            preview.src = e.target.result;
+        };
+        reader.readAsDataURL(file);
+    }
 }
 
 function resetForm() {
     document.getElementById('bookForm').reset();
     document.getElementById('bookId').value = '';
+    document.getElementById('existingCoverImage').value = '';
     document.getElementById('bookCategoryCustom').value = '';
     document.getElementById('initialCopies').value = '5';
     document.getElementById('copyNotes').value = '';
+    document.getElementById('coverPreview').src = '../assets/images/default-book-cover.jpg';
+    document.getElementById('coverError').style.display = 'none';
     document.getElementById('bookModalTitle').innerHTML = '<i class="fa fa-book"></i><span>Add New Book</span>';
+}
+
+// Load AI recommendations
+async function loadAIRecommendations() {
+    try {
+        const response = await fetch('../api/ai_recommendations.php?action=recommend');
+        if (!response.ok) throw new Error('Failed to load AI recommendations');
+        
+        const recommendations = await response.json();
+        
+        let html = '';
+        if (!recommendations || recommendations.length === 0) {
+            html = '<div class="empty-state"><p>No AI recommendations needed - all books have locations!</p></div>';
+        } else {
+            html = `
+                <div class="table-responsive">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Book</th>
+                                <th>Recommended Location</th>
+                                <th>Category</th>
+                                <th>Status</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+            `;
+            
+            recommendations.forEach(rec => {
+                const locationOccupied = rec.location_occupied || false;
+                const locationStatus = locationOccupied ? 
+                    '<span class="badge badge-warning">Occupied - AI will find alternative</span>' :
+                    '<span class="badge badge-success">Available</span>';
+                
+                html += `
+                    <tr>
+                        <td>
+                            <strong>${escapeHtml(rec.title)}</strong><br>
+                            <small>${escapeHtml(rec.author)}</small>
+                        </td>
+                        <td>
+                            <span class="location-badge">
+                                ${rec.ai_location || 'Not set'}
+                            </span><br>
+                            ${locationStatus}
+                        </td>
+                        <td>${rec.category_name || 'Uncategorized'}</td>
+                        <td>
+                            <span class="badge badge-warning">
+                                <i class="fa fa-robot"></i> AI Recommended
+                            </span>
+                        </td>
+                        <td>
+                            <button class="btn btn-sm btn-primary" onclick="applyBookLocation(${rec.book_id})">
+                                <i class="fa fa-check"></i> Apply AI
+                            </button>
+                            <button class="btn btn-sm btn-outline" onclick="showSlotOccupancyForBook(${rec.book_id})">
+                                <i class="fa fa-map"></i> Check Slots
+                            </button>
+                        </td>
+                    </tr>
+                `;
+            });
+            
+            html += `</tbody></table></div>`;
+        }
+        
+        document.getElementById('aiRecommendations').innerHTML = html;
+        document.getElementById('aiRecommendationCount').textContent = recommendations?.length || 0;
+        
+    } catch (error) {
+        console.error('Error loading AI recommendations:', error);
+        document.getElementById('aiRecommendations').innerHTML = 
+            `<div class="error">Error loading recommendations: ${escapeHtml(error.message)}</div>`;
+    }
+}
+
+// Show slot occupancy for a specific book
+async function showSlotOccupancyForBook(bookId) {
+    try {
+        // Get book details
+        const bookResponse = await fetch(`../api/dispatch.php?resource=books&id=${bookId}`);
+        if (!bookResponse.ok) throw new Error('Failed to fetch book details');
+        const book = await bookResponse.json();
+        
+        // Get AI recommendation
+        const aiResponse = await fetch(`../api/ai_recommendations.php?action=recommend&book_id=${bookId}`);
+        if (!aiResponse.ok) throw new Error('Failed to fetch AI recommendation');
+        const aiRec = await aiResponse.json();
+        
+        // Get all occupied slots in the recommended section
+        const section = aiRec.default_section || 'A';
+        const slotsResponse = await fetch(`../api/ai_recommendations.php?action=search_location&section=${section}`);
+        if (!slotsResponse.ok) throw new Error('Failed to fetch slot data');
+        const occupiedSlots = await slotsResponse.json();
+        
+        // Get library map config for this section
+        const config = <?= json_encode($library_map) ?>.find(c => c.section === section) || {
+            shelf_count: 5,
+            rows_per_shelf: 6,
+            slots_per_row: 12
+        };
+        
+        // Create slot table
+        let html = `
+            <div class="slot-info">
+                <h5><i class="fa fa-book"></i> ${escapeHtml(book.title)}</h5>
+                <p>AI Recommended Location: <strong>${aiRec.ai_location || 'Not set'}</strong></p>
+                <div class="slot-details">
+                    <div class="slot-details-item">
+                        <label><i class="fa fa-map-marker"></i> Section:</label>
+                        <p>${section}</p>
+                    </div>
+                    <div class="slot-details-item">
+                        <label><i class="fa fa-layer-group"></i> Shelves:</label>
+                        <p>${config.shelf_count}</p>
+                    </div>
+                    <div class="slot-details-item">
+                        <label><i class="fa fa-grip-lines"></i> Rows per Shelf:</label>
+                        <p>${config.rows_per_shelf}</p>
+                    </div>
+                    <div class="slot-details-item">
+                        <label><i class="fa fa-box-open"></i> Slots per Row:</label>
+                        <p>${config.slots_per_row}</p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="mt-2">
+                <h5>Slot Occupancy Map</h5>
+                <p class="text-muted small">Green = Available, Red = Occupied, Blue = AI Recommended Slot</p>
+            </div>
+            
+            <div class="table-responsive">
+                <table class="slot-table">
+                    <thead>
+                        <tr>
+                            <th>Shelf</th>
+                            <th>Row</th>
+        `;
+        
+        // Create slot headers (1-12)
+        for (let slot = 1; slot <= config.slots_per_row; slot++) {
+            html += `<th>${slot}</th>`;
+        }
+        
+        html += `</tr></thead><tbody>`;
+        
+        // Create table rows for each shelf and row
+        for (let shelf = 1; shelf <= config.shelf_count; shelf++) {
+            for (let row = 1; row <= config.rows_per_shelf; row++) {
+                html += `<tr>`;
+                if (row === 1) {
+                    html += `<td rowspan="${config.rows_per_shelf}" style="vertical-align: middle;">Shelf ${shelf}</td>`;
+                }
+                html += `<td>Row ${row}</td>`;
+                
+                for (let slot = 1; slot <= config.slots_per_row; slot++) {
+                    const isRecommended = (shelf == aiRec.shelf_recommendation && 
+                                          row == aiRec.row_recommendation && 
+                                          slot == aiRec.slot_recommendation);
+                    
+                    // Check if slot is occupied
+                    const occupiedSlot = occupiedSlots.find(s => 
+                        s.section === section && 
+                        s.shelf == shelf && 
+                        s.row_number == row && 
+                        s.slot == slot
+                    );
+                    
+                    let slotClass = 'slot-empty';
+                    let slotTitle = `Shelf ${shelf}, Row ${row}, Slot ${slot}: Available`;
+                    
+                    if (occupiedSlot) {
+                        slotClass = 'slot-occupied-book';
+                        slotTitle = `Shelf ${shelf}, Row ${row}, Slot ${slot}: Occupied by ${occupiedSlot.title}`;
+                    }
+                    
+                    if (isRecommended) {
+                        slotClass = 'slot-selected';
+                        slotTitle = `Shelf ${shelf}, Row ${row}, Slot ${slot}: AI Recommended Location`;
+                    }
+                    
+                    html += `<td class="${slotClass}" title="${slotTitle}">`;
+                    
+                    if (occupiedSlot) {
+                        html += `<i class="fa fa-book"></i>`;
+                    } else if (isRecommended) {
+                        html += `<i class="fa fa-robot"></i>`;
+                    } else {
+                        html += `&nbsp;`;
+                    }
+                    
+                    html += `</td>`;
+                }
+                
+                html += `</tr>`;
+            }
+        }
+        
+        html += `</tbody></table></div>`;
+        
+        // Add occupied slots list
+        const occupiedInSection = occupiedSlots.filter(s => s.section === section);
+        if (occupiedInSection.length > 0) {
+            html += `
+                <div class="slot-info mt-2">
+                    <h5><i class="fa fa-exclamation-triangle"></i> Occupied Slots in Section ${section}</h5>
+                    <div class="table-responsive">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Location</th>
+                                    <th>Book</th>
+                                    <th>Author</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+            `;
+            
+            occupiedInSection.forEach(slot => {
+                html += `
+                    <tr>
+                        <td>${slot.section}-${slot.shelf}-${slot.row_number}-${slot.slot}</td>
+                        <td>${escapeHtml(slot.title)}</td>
+                        <td>${escapeHtml(slot.author)}</td>
+                        <td><span class="copy-status status-${slot.status}">${slot.status}</span></td>
+                    </tr>
+                `;
+            });
+            
+            html += `</tbody></table></div></div>`;
+        }
+        
+        document.getElementById('slotOccupancyContent').innerHTML = html;
+        showSlotOccupancyModal();
+        
+    } catch (error) {
+        document.getElementById('slotOccupancyContent').innerHTML = 
+            `<div class="error">Error loading slot occupancy: ${escapeHtml(error.message)}</div>`;
+        showSlotOccupancyModal();
+    }
+}
+
+// Apply AI location to a book
+async function applyBookLocation(bookId) {
+    try {
+        // Get AI recommendation for this book
+        const response = await fetch(`../api/ai_recommendations.php?action=recommend&book_id=${bookId}`);
+        if (!response.ok) throw new Error('Failed to get recommendation');
+        
+        const recommendation = await response.json();
+        
+        if (!recommendation.ai_location) {
+            alert('No AI recommendation available for this book');
+            return;
+        }
+        
+        if (confirm(`Apply AI recommendation: ${recommendation.ai_location}?\n\nThis will place the book in the recommended location or find a nearby available slot if occupied.`)) {
+            // Get all copies of this book
+            const copiesResponse = await fetch(`../api/book_copies.php?book_id=${bookId}`);
+            if (!copiesResponse.ok) throw new Error('Failed to fetch copies');
+            
+            const copies = await copiesResponse.json();
+            
+            const csrf = sessionStorage.getItem('csrf') || '';
+            let applied = 0;
+            let errors = 0;
+            
+            for (const copy of copies) {
+                if (!copy.current_section && copy.status === 'available') {
+                    try {
+                        const locationResponse = await fetch('../api/ai_recommendations.php', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-CSRF-Token': csrf
+                            },
+                            body: JSON.stringify({
+                                copy_id: copy.id,
+                                section: recommendation.default_section || 'A',
+                                shelf: recommendation.shelf_recommendation || 1,
+                                row: recommendation.row_recommendation || 1,
+                                slot: recommendation.slot_recommendation || 1
+                            })
+                        });
+                        
+                        if (locationResponse.ok) {
+                            applied++;
+                        } else {
+                            errors++;
+                            console.error('Failed to apply location for copy', copy.id);
+                        }
+                    } catch (error) {
+                        errors++;
+                        console.error('Error applying location:', error);
+                    }
+                }
+            }
+            
+            if (applied > 0) {
+                alert(`Successfully applied locations to ${applied} copies${errors > 0 ? ` (${errors} failed)` : ''}`);
+                loadAIRecommendations(); // Refresh the list
+            } else {
+                alert(`No copies were updated. Make sure the book has available copies without locations.`);
+            }
+        }
+        
+    } catch (error) {
+        alert('Error applying location: ' + error.message);
+    }
 }
 
 // Show book copies
@@ -2115,6 +2556,18 @@ async function showCopies(bookId) {
             });
             
             html += `</tbody></table></div>`;
+            
+            // Add AI location button if book has no location
+            const hasNoLocation = copies.some(copy => !copy.current_section);
+            if (hasNoLocation) {
+                html += `
+                    <div class="mt-2">
+                        <button class="btn btn-sm btn-primary" onclick="applyBookLocation(${bookId})">
+                            <i class="fa fa-robot"></i> Apply AI Location Recommendation
+                        </button>
+                    </div>
+                `;
+            }
         }
         
         document.getElementById('copiesContent').innerHTML = html;
@@ -2238,6 +2691,11 @@ async function editCopy(copyId) {
         document.getElementById('editCopyModalTitle').innerHTML = `<i class="fa fa-edit"></i> Edit Copy: ${escapeHtml(copy.copy_number)}`;
         showEditCopyModal();
         
+        // Check slot availability if location is set
+        if (copy.current_section && copy.current_shelf && copy.current_row && copy.current_slot) {
+            setTimeout(checkSlotAvailability, 100);
+        }
+        
     } catch (error) {
         alert('Error loading copy for editing: ' + error.message);
     }
@@ -2274,7 +2732,7 @@ async function deleteCopy(copyId, copyNumber) {
     }
 }
 
-// View Book Details (keep existing function)
+// View Book Details with cover image
 async function viewBook(id) {
     try {
         const response = await fetch(`../api/dispatch.php?resource=books&id=${id}`);
@@ -2282,54 +2740,81 @@ async function viewBook(id) {
         
         const book = await response.json();
         
+        // Check for cover image
+        const cover_image = book.cover_image_cache || book.cover_image || null;
+        const cover_url = cover_image ? '../uploads/covers/' + escapeHtml(cover_image) : '../assets/images/default-book-cover.jpg';
+        
         // Create HTML content
         const html = `
             <div class="book-details">
-                <div class="detail-header">
-                    <h4>${escapeHtml(book.title)}</h4>
-                    <span class="category-badge">${escapeHtml(book.category || 'Uncategorized')}</span>
+                <div class="book-details-header">
+                    <div class="book-details-cover">
+                        <img src="${cover_url}" 
+                             alt="${escapeHtml(book.title)}" 
+                             onerror="this.src='../assets/images/default-book-cover.jpg'">
+                    </div>
+                    <div class="book-details-info">
+                        <h4>${escapeHtml(book.title)}</h4>
+                        <div class="book-details-meta">
+                            <div class="book-details-meta-item">
+                                <i class="fa fa-user"></i>
+                                <span>${escapeHtml(book.author)}</span>
+                            </div>
+                            ${book.year_published ? `
+                                <div class="book-details-meta-item">
+                                    <i class="fa fa-calendar"></i>
+                                    <span>${book.year_published}</span>
+                                </div>
+                            ` : ''}
+                            ${book.isbn ? `
+                                <div class="book-details-meta-item">
+                                    <i class="fa fa-barcode"></i>
+                                    <span>${escapeHtml(book.isbn)}</span>
+                                </div>
+                            ` : ''}
+                        </div>
+                        ${book.publisher ? `
+                            <div class="book-details-meta-item">
+                                <i class="fa fa-building"></i>
+                                <span>${escapeHtml(book.publisher)}</span>
+                            </div>
+                        ` : ''}
+                        ${book.category ? `
+                            <div class="book-details-meta-item">
+                                <i class="fa fa-tag"></i>
+                                <span class="category-badge">${escapeHtml(book.category)}</span>
+                            </div>
+                        ` : ''}
+                    </div>
                 </div>
                 
-                <div class="detail-grid">
-                    <div class="detail-item">
-                        <label><i class="fa fa-user"></i> Author</label>
-                        <p>${escapeHtml(book.author)}</p>
-                    </div>
-                    
-                    <div class="detail-item">
-                        <label><i class="fa fa-barcode"></i> ISBN</label>
-                        <p>${book.isbn ? escapeHtml(book.isbn) : 'Not specified'}</p>
-                    </div>
-                    
-                    <div class="detail-item">
-                        <label><i class="fa fa-building"></i> Publisher</label>
-                        <p>${book.publisher ? escapeHtml(book.publisher) : 'Not specified'}</p>
-                    </div>
-                    
-                    <div class="detail-item">
-                        <label><i class="fa fa-calendar"></i> Year Published</label>
-                        <p>${book.year_published || 'Not specified'}</p>
-                    </div>
-                    
-                    <div class="detail-item">
+                <div class="book-details-grid">
+                    <div class="book-details-item">
                         <label><i class="fa fa-copy"></i> Total Copies</label>
                         <p>${book.total_copies_cache || 0}</p>
                     </div>
                     
-                    <div class="detail-item">
+                    <div class="book-details-item">
                         <label><i class="fa fa-check-circle"></i> Available Copies</label>
                         <p>${book.available_copies_cache || 0}</p>
                     </div>
+                    
+                    ${book.category_id ? `
+                        <div class="book-details-item">
+                            <label><i class="fa fa-sitemap"></i> Category ID</label>
+                            <p>${book.category_id}</p>
+                        </div>
+                    ` : ''}
                 </div>
                 
                 ${book.description ? `
-                    <div class="detail-section">
+                    <div class="book-details-section">
                         <h5><i class="fa fa-align-left"></i> Description</h5>
                         <p>${escapeHtml(book.description)}</p>
                     </div>
                 ` : ''}
                 
-                <div class="detail-footer">
+                <div class="book-details-footer">
                     <small class="text-muted">
                         <i class="fa fa-clock"></i>
                         Created: ${new Date(book.created_at).toLocaleDateString()}
@@ -2360,6 +2845,9 @@ document.addEventListener('DOMContentLoaded', function() {
     // Add Book Button
     document.getElementById('btnAddBook').addEventListener('click', showModal);
     
+    // Load AI recommendations
+    loadAIRecommendations();
+    
     // Add Copies buttons on table rows
     document.querySelectorAll('.add-copies-btn').forEach(btn => {
         btn.addEventListener('click', function() {
@@ -2389,6 +2877,15 @@ document.addEventListener('DOMContentLoaded', function() {
                 document.getElementById('bookPublisher').value = book.publisher || '';
                 document.getElementById('bookYear').value = book.year_published || '';
                 document.getElementById('bookDescription').value = book.description || '';
+                document.getElementById('existingCoverImage').value = book.cover_image || '';
+                
+                // Set cover preview
+                const cover_image = book.cover_image_cache || book.cover_image;
+                if (cover_image) {
+                    document.getElementById('coverPreview').src = '../uploads/covers/' + escapeHtml(cover_image);
+                } else {
+                    document.getElementById('coverPreview').src = '../assets/images/default-book-cover.jpg';
+                }
                 
                 // Hide initial copies section for editing
                 document.getElementById('initialCopiesSection').style.display = 'none';
@@ -2409,7 +2906,7 @@ document.addEventListener('DOMContentLoaded', function() {
     document.querySelectorAll('.delete-book-btn').forEach(btn => {
         btn.addEventListener('click', async function() {
             const id = this.getAttribute('data-id');
-            if (!confirm('Are you sure you want to delete this book? This will also delete all copies. This action cannot be undone.')) {
+            if (!confirm('Are you sure you want to delete this book? This will also delete all copies and the cover image. This action cannot be undone.')) {
                 return;
             }
             
@@ -2445,32 +2942,32 @@ document.addEventListener('DOMContentLoaded', function() {
         }
         
         // Prepare book data
-        const bookData = {
-            title: document.getElementById('bookTitle').value.trim(),
-            author: document.getElementById('bookAuthor').value.trim(),
-            isbn: document.getElementById('bookISBN').value.trim() || null,
-            publisher: document.getElementById('bookPublisher').value.trim() || null,
-            year_published: document.getElementById('bookYear').value || null,
-            description: document.getElementById('bookDescription').value.trim() || null
-        };
+        const bookData = new FormData();
+        bookData.append('title', document.getElementById('bookTitle').value.trim());
+        bookData.append('author', document.getElementById('bookAuthor').value.trim());
+        bookData.append('isbn', document.getElementById('bookISBN').value.trim() || '');
+        bookData.append('publisher', document.getElementById('bookPublisher').value.trim() || '');
+        bookData.append('year_published', document.getElementById('bookYear').value || '');
+        bookData.append('description', document.getElementById('bookDescription').value.trim() || '');
         
         // Handle category (either category_id or custom category)
         const categoryId = document.getElementById('bookCategory').value;
         const customCategory = document.getElementById('bookCategoryCustom').value.trim();
         
         if (categoryId) {
-            bookData.category_id = parseInt(categoryId);
-            bookData.category = null; // Clear custom category when using category_id
+            bookData.append('category_id', categoryId);
         } else if (customCategory) {
-            bookData.category = customCategory;
-            bookData.category_id = null; // Clear category_id when using custom category
-        } else {
-            bookData.category = null;
-            bookData.category_id = null;
+            bookData.append('category', customCategory);
         }
         
         const id = document.getElementById('bookId').value;
         const isEdit = !!id;
+        
+        // Handle cover image upload
+        const coverFile = document.getElementById('coverImage').files[0];
+        if (coverFile) {
+            bookData.append('cover_image', coverFile);
+        }
         
         // Only include initial copies for new books
         if (!isEdit) {
@@ -2479,32 +2976,32 @@ document.addEventListener('DOMContentLoaded', function() {
             const copyNotes = document.getElementById('copyNotes').value.trim();
             
             if (initialCopies > 0) {
-                bookData.initial_copies = {
-                    count: initialCopies,
-                    condition: copyCondition,
-                    notes: copyNotes || null
-                };
+                bookData.append('initial_copies[count]', initialCopies);
+                bookData.append('initial_copies[condition]', copyCondition);
+                if (copyNotes) {
+                    bookData.append('initial_copies[notes]', copyNotes);
+                }
             }
         }
         
         try {
             const csrf = sessionStorage.getItem('csrf') || '';
             const url = isEdit ? 
-                `../api/dispatch.php?resource=books&id=${id}` : 
-                '../api/dispatch.php?resource=books';
+                `../api/books.php?action=update&id=${id}` : 
+                '../api/books.php?action=create';
             
             const response = await fetch(url, {
-                method: isEdit ? 'PUT' : 'POST',
+                method: 'POST',
                 headers: {
-                    'Content-Type': 'application/json',
                     'X-CSRF-Token': csrf
                 },
-                body: JSON.stringify(bookData)
+                body: bookData
             });
             
+            const result = await response.json();
+            
             if (!response.ok) {
-                const error = await response.json();
-                throw new Error(error.error || 'Save failed');
+                throw new Error(result.error || 'Save failed');
             }
             
             alert(`Book ${isEdit ? 'updated' : 'added'} successfully!`);
@@ -2570,16 +3067,35 @@ document.addEventListener('DOMContentLoaded', function() {
     // Save Edit Copy
     document.getElementById('saveEditCopy').addEventListener('click', async function() {
         const copyId = document.getElementById('editCopyId').value;
+        const section = document.getElementById('editSection').value;
+        const shelf = document.getElementById('editShelf').value;
+        const row = document.getElementById('editRow').value;
+        const slot = document.getElementById('editSlot').value;
+        
+        // Check if trying to place in occupied slot
+        if (section && shelf && row && slot) {
+            try {
+                const checkResponse = await fetch(`../api/ai_recommendations.php?action=check_slot&section=${section}&shelf=${shelf}&row=${row}&slot=${slot}`);
+                if (checkResponse.ok) {
+                    const checkResult = await checkResponse.json();
+                    if (checkResult.occupied && !confirm(`This slot is occupied by "${checkResult.book_title}". Are you sure you want to place another book here?`)) {
+                        return;
+                    }
+                }
+            } catch (error) {
+                console.warn('Could not check slot occupancy:', error);
+            }
+        }
         
         const copyData = {
             copy_number: document.getElementById('editCopyNumber').value.trim(),
             barcode: document.getElementById('editBarcode').value.trim() || null,
             status: document.getElementById('editStatus').value,
             book_condition: document.getElementById('editCondition').value,
-            current_section: document.getElementById('editSection').value || null,
-            current_shelf: document.getElementById('editShelf').value || null,
-            current_row: document.getElementById('editRow').value || null,
-            current_slot: document.getElementById('editSlot').value || null,
+            current_section: section || null,
+            current_shelf: shelf || null,
+            current_row: row || null,
+            current_slot: slot || null,
             notes: document.getElementById('editNotes').value.trim() || null
         };
         
@@ -2632,9 +3148,14 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
     
+    // Click on cover image to trigger file input
+    document.getElementById('coverPreview').addEventListener('click', function() {
+        document.getElementById('coverImage').click();
+    });
+    
     // Close modals on outside click
     window.addEventListener('click', function(event) {
-        const modals = ['bookModal', 'viewModal', 'copiesModal', 'viewCopiesModal', 'copyDetailsModal', 'editCopyModal'];
+        const modals = ['bookModal', 'viewModal', 'copiesModal', 'viewCopiesModal', 'copyDetailsModal', 'editCopyModal', 'slotOccupancyModal'];
         modals.forEach(modalId => {
             const modal = document.getElementById(modalId);
             if (event.target === modal) {
@@ -2644,6 +3165,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (modalId === 'viewCopiesModal') closeViewCopiesModal();
                 if (modalId === 'copyDetailsModal') closeCopyDetailsModal();
                 if (modalId === 'editCopyModal') closeEditCopyModal();
+                if (modalId === 'slotOccupancyModal') closeSlotOccupancyModal();
             }
         });
     });

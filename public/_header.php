@@ -35,10 +35,10 @@ $user = current_user();
                 $items = [
                     ['Dashboard','dashboard.php','fa-gauge',['admin','librarian','assistant','student','non_staff']],
                     ['Manage Books','manage_books.php','fa-book',['admin','librarian','assistant']],
-                    ['Library Map','library_map.php','fa-map',['admin','librarian','assistant','student','non_staff']],
-                    ['My Borrowed Books','my_borrowed_books.php','fa-user-clock',['student','non_staff']],
+                    ['Library Map','library_map.php','fa-map',['admin','librarian','assistant',]],
                     ['Books','books.php','fa-book',['student','non_staff']],
                     ['Request Book','request_book.php','fa-book-medical',['student','non_staff']],
+                    ['My Borrowed Books','my_borrowed_books.php','fa-user-clock',['student','non_staff']],
                     ['Borrowed Books','issued_books.php','fa-file-lines',['admin','librarian','assistant']],
                     ['View Requested Books','view_requested_books.php','fa-eye',['admin','librarian','assistant']],
                     ['E‑Books','ebooks.php','fa-book-open-reader',['admin','librarian','assistant','student','non_staff']],

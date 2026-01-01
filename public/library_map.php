@@ -24,6 +24,7 @@ $stmt = $pdo->query("
         b.id as book_id,
         b.title,
         b.author,
+        b.cover_image_cache,
         c.name as category_name,
         c.default_section,
         c.shelf_recommendation,
@@ -35,25 +36,33 @@ $stmt = $pdo->query("
     LEFT JOIN categories c ON b.category_id = c.id
     LEFT JOIN book_copies bc ON b.id = bc.book_id AND bc.is_active = 1
     WHERE b.is_active = 1
-    GROUP BY b.id, b.title, b.author, c.name, c.default_section, 
+    GROUP BY b.id, b.title, b.author, b.cover_image_cache, c.name, c.default_section, 
              c.shelf_recommendation, c.row_recommendation, c.slot_recommendation
     HAVING needs_location > 0 OR total_copies = 0
     ORDER BY c.default_section, c.shelf_recommendation
 ");
 $recommendations = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-// Get occupancy data for map
+// Get occupancy data for map with book covers
 $occupancy = [];
+$book_covers = [];
+
 foreach ($sections as $section) {
     $stmt = $pdo->prepare("
         SELECT 
-            current_shelf as shelf,
-            current_row as row,
-            current_slot as slot,
-            COUNT(*) as count
-        FROM book_copies 
-        WHERE current_section = ? AND is_active = 1
-        GROUP BY current_shelf, current_row, current_slot
+            bc.current_shelf as shelf,
+            bc.current_row as row,
+            bc.current_slot as slot,
+            COUNT(*) as count,
+            b.id as book_id,
+            b.title,
+            b.cover_image_cache,
+            GROUP_CONCAT(DISTINCT b.title) as book_titles,
+            GROUP_CONCAT(DISTINCT b.cover_image_cache) as cover_images
+        FROM book_copies bc
+        LEFT JOIN books b ON bc.book_id = b.id
+        WHERE bc.current_section = ? AND bc.is_active = 1
+        GROUP BY bc.current_shelf, bc.current_row, bc.current_slot
     ");
     $stmt->execute([$section['section']]);
     $section_occupancy = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -62,6 +71,15 @@ foreach ($sections as $section) {
     foreach ($section_occupancy as $occ) {
         $key = "{$occ['shelf']}-{$occ['row']}-{$occ['slot']}";
         $occupancy[$section['section']][$key] = true;
+        
+        // Store book cover for this location
+        if ($occ['book_id']) {
+            $book_covers[$section['section']][$key] = [
+                'book_id' => $occ['book_id'],
+                'title' => $occ['title'],
+                'cover_image' => $occ['cover_image_cache']
+            ];
+        }
     }
 }
 
@@ -116,6 +134,9 @@ include __DIR__ . '/_header.php';
                         <button class="btn btn-sm btn-soft" id="toggleLegend">
                             <i class="fas fa-layer-group"></i> Legend
                         </button>
+                        <button class="btn btn-sm btn-soft" id="toggleBookCovers">
+                            <i class="fas fa-image"></i> Covers
+                        </button>
                     </div>
                 </div>
             </div>
@@ -151,20 +172,36 @@ include __DIR__ . '/_header.php';
                                                     <div class="slots-grid">
                                                         <?php for ($slot = 1; $slot <= $section['slots_per_row']; $slot++): ?>
                                                             <?php 
+                                                            $slot_id = "{$section['section']}-S{$shelf}-R{$row}-P{$slot}";
                                                             $occupied = isset($occupancy[$section['section']]["$shelf-$row-$slot"]);
                                                             $slot_class = $occupied ? 'occupied' : 'available';
-                                                            $slot_id = "{$section['section']}-S{$shelf}-R{$row}-P{$slot}";
+                                                            $has_cover = false;
+                                                            $cover_info = null;
+                                                            
+                                                            if ($occupied && isset($book_covers[$section['section']]["$shelf-$row-$slot"])) {
+                                                                $has_cover = true;
+                                                                $cover_info = $book_covers[$section['section']]["$shelf-$row-$slot"];
+                                                            }
                                                             ?>
                                                             <div class="slot <?= $slot_class ?>"
                                                                  data-section="<?= $section['section'] ?>"
                                                                  data-shelf="<?= $shelf ?>"
                                                                  data-row="<?= $row ?>"
                                                                  data-slot="<?= $slot ?>"
-                                                                 title="<?= $slot_id ?>">
+                                                                 data-book-id="<?= $has_cover ? $cover_info['book_id'] : '' ?>"
+                                                                 title="<?= $has_cover ? htmlspecialchars($cover_info['title']) : $slot_id ?>">
                                                                 <span class="slot-number"><?= $slot ?></span>
                                                                 <?php if ($occupied): ?>
                                                                     <div class="slot-indicator">
-                                                                        <i class="fas fa-book"></i>
+                                                                        <?php if ($has_cover && $cover_info['cover_image']): ?>
+                                                                            <img src="../uploads/covers/<?= htmlspecialchars($cover_info['cover_image']) ?>" 
+                                                                                 alt="Book cover" 
+                                                                                 class="book-cover-preview"
+                                                                                 data-book-id="<?= $cover_info['book_id'] ?>"
+                                                                                 data-title="<?= htmlspecialchars($cover_info['title']) ?>">
+                                                                        <?php else: ?>
+                                                                            <i class="fas fa-book"></i>
+                                                                        <?php endif; ?>
                                                                     </div>
                                                                 <?php else: ?>
                                                                     <div class="slot-indicator empty">
@@ -213,17 +250,10 @@ include __DIR__ . '/_header.php';
                         </div>
                     </div>
                     <div class="legend-item">
-                        <div class="legend-symbol section-a"></div>
+                        <div class="legend-symbol cover-visible"></div>
                         <div class="legend-text">
-                            <span class="legend-title">Section A</span>
-                            <span class="legend-desc">Information Technology</span>
-                        </div>
-                    </div>
-                    <div class="legend-item">
-                        <div class="legend-symbol section-b"></div>
-                        <div class="legend-text">
-                            <span class="legend-title">Section B</span>
-                            <span class="legend-desc">Psychology</span>
+                            <span class="legend-title">Cover Visible</span>
+                            <span class="legend-desc">Book cover displayed</span>
                         </div>
                     </div>
                 </div>
@@ -289,19 +319,29 @@ include __DIR__ . '/_header.php';
                             <div class="recommendation-content">
                                 <div class="recommendation-header">
                                     <div class="book-info">
-                                        <h5 class="book-title"><?= htmlspecialchars($rec['title']) ?></h5>
-                                        <p class="book-author"><?= htmlspecialchars($rec['author']) ?></p>
-                                        <div class="book-meta">
-                                            <span class="meta-item">
-                                                <i class="fas fa-copy"></i>
-                                                <?= $rec['total_copies'] ?> copies
-                                            </span>
-                                            <?php if ($rec['needs_location'] > 0): ?>
-                                                <span class="meta-item warning">
-                                                    <i class="fas fa-exclamation-circle"></i>
-                                                    <?= $rec['needs_location'] ?> need placement
-                                                </span>
+                                        <div class="book-header-with-cover">
+                                            <?php if (!empty($rec['cover_image_cache'])): ?>
+                                                <img src="../uploads/covers/<?= htmlspecialchars($rec['cover_image_cache']) ?>" 
+                                                     alt="Book cover" 
+                                                     class="recommendation-book-cover"
+                                                     data-book-id="<?= $rec['book_id'] ?>">
                                             <?php endif; ?>
+                                            <div class="book-details">
+                                                <h5 class="book-title"><?= htmlspecialchars($rec['title']) ?></h5>
+                                                <p class="book-author"><?= htmlspecialchars($rec['author']) ?></p>
+                                                <div class="book-meta">
+                                                    <span class="meta-item">
+                                                        <i class="fas fa-copy"></i>
+                                                        <?= $rec['total_copies'] ?> copies
+                                                    </span>
+                                                    <?php if ($rec['needs_location'] > 0): ?>
+                                                        <span class="meta-item warning">
+                                                            <i class="fas fa-exclamation-circle"></i>
+                                                            <?= $rec['needs_location'] ?> need placement
+                                                        </span>
+                                                    <?php endif; ?>
+                                                </div>
+                                            </div>
                                         </div>
                                     </div>
                                     <div class="category-tag" style="background: <?= getCategoryColor($rec['category_name']) ?>">
@@ -387,6 +427,22 @@ include __DIR__ . '/_header.php';
                     </div>
                 </div>
             <?php endif; ?>
+        </div>
+    </div>
+</div>
+
+<!-- Book Cover Modal -->
+<div class="modal" id="coverModal">
+    <div class="modal-content modal-sm">
+        <div class="modal-header">
+            <div class="modal-title">
+                <i class="fas fa-book"></i>
+                <h3 id="coverModalTitle">Book Cover</h3>
+            </div>
+            <button class="modal-close" onclick="closeCoverModal()">&times;</button>
+        </div>
+        <div class="modal-body" id="coverModalContent">
+            <!-- Content loaded dynamically -->
         </div>
     </div>
 </div>
@@ -753,6 +809,11 @@ function getCategoryColor($category) {
     box-shadow: 0 4px 12px rgba(0,0,0,0.15);
 }
 
+.slot:hover .book-cover-preview {
+    transform: scale(1.5);
+    z-index: 100;
+}
+
 .slot .slot-number {
     position: absolute;
     top: 2px;
@@ -760,19 +821,36 @@ function getCategoryColor($category) {
     font-size: 0.6rem;
     font-weight: 600;
     color: #6b7280;
+    z-index: 2;
 }
 
 .slot-indicator {
-    width: 20px;
-    height: 20px;
+    width: 28px;
+    height: 28px;
     display: flex;
     align-items: center;
     justify-content: center;
-    border-radius: 4px;
+    border-radius: 6px;
+    position: relative;
+    overflow: hidden;
 }
 
 .slot-indicator i {
     font-size: 0.75rem;
+}
+
+/* Book Cover Preview in Slots */
+.book-cover-preview {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 4px;
+    transition: transform 0.3s ease;
+    cursor: pointer;
+}
+
+.book-cover-preview:hover {
+    transform: scale(1.5);
 }
 
 /* Slot States */
@@ -795,8 +873,8 @@ function getCategoryColor($category) {
 }
 
 .slot.occupied .slot-indicator {
-    background: var(--danger);
-    color: white;
+    background: #fef2f2;
+    border: 1px solid #fecaca;
 }
 
 .slot.recommended {
@@ -808,6 +886,26 @@ function getCategoryColor($category) {
 .slot.recommended .slot-indicator {
     background: var(--warning);
     color: white;
+}
+
+/* Book Cover in Recommendations */
+.recommendation-book-cover {
+    width: 60px;
+    height: 80px;
+    object-fit: cover;
+    border-radius: 4px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    margin-right: 1rem;
+    flex-shrink: 0;
+}
+
+.book-header-with-cover {
+    display: flex;
+    align-items: flex-start;
+}
+
+.book-details {
+    flex: 1;
 }
 
 /* Map Legend */
@@ -890,10 +988,13 @@ function getCategoryColor($category) {
 }
 
 .legend-symbol.available { background: var(--success); }
-.legend-symbol.occupied { background: var(--danger); }
+.legend-symbol.occupied { background: #fef2f2; border: 1px solid #fecaca; }
 .legend-symbol.recommended { background: var(--warning); }
-.legend-symbol.section-a { background: #3B82F6; }
-.legend-symbol.section-b { background: #10B981; }
+.legend-symbol.cover-visible { 
+    background: #3b82f6; 
+    background-image: linear-gradient(45deg, #3b82f6 25%, #60a5fa 25%, #60a5fa 50%, #3b82f6 50%, #3b82f6 75%, #60a5fa 75%, #60a5fa 100%);
+    background-size: 8px 8px;
+}
 
 .legend-text {
     flex: 1;
@@ -1290,6 +1391,10 @@ function getCategoryColor($category) {
     max-width: 800px;
 }
 
+.modal-sm {
+    max-width: 400px;
+}
+
 .modal-header {
     padding: 1.5rem;
     border-bottom: 1px solid var(--border);
@@ -1343,6 +1448,34 @@ function getCategoryColor($category) {
     display: flex;
     justify-content: flex-end;
     gap: 0.75rem;
+}
+
+/* Book Cover Modal */
+.cover-modal-content {
+    text-align: center;
+    padding: 2rem;
+}
+
+.cover-large {
+    max-width: 300px;
+    max-height: 400px;
+    object-fit: contain;
+    margin: 0 auto 1.5rem;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+}
+
+.book-title-large {
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: #1f2937;
+    margin-bottom: 0.5rem;
+}
+
+.book-author-large {
+    font-size: 1rem;
+    color: #6b7280;
+    margin-bottom: 1.5rem;
 }
 
 /* Animations */
@@ -1434,6 +1567,50 @@ function getCategoryColor($category) {
 .map-container::-webkit-scrollbar-thumb:hover {
     background: #a1a1a1;
 }
+
+/* Tooltip for book covers */
+.slot:hover::after {
+    content: attr(title);
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0,0,0,0.8);
+    color: white;
+    padding: 0.5rem 0.75rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    white-space: nowrap;
+    z-index: 1000;
+    margin-bottom: 5px;
+    pointer-events: none;
+}
+
+.slot[title^="A-"]:hover::after,
+.slot[title^="B-"]:hover::after,
+.slot[title^="C-"]:hover::after,
+.slot[title^="D-"]:hover::after,
+.slot[title^="E-"]:hover::after,
+.slot[title^="F-"]:hover::after {
+    content: '';
+}
+
+.slot:hover .book-cover-preview::after {
+    content: attr(data-title);
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0,0,0,0.8);
+    color: white;
+    padding: 0.5rem 0.75rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    white-space: nowrap;
+    z-index: 1000;
+    margin-bottom: 5px;
+    pointer-events: none;
+}
 </style>
 
 <script>
@@ -1446,6 +1623,9 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Initialize event listeners
     initEventListeners();
+    
+    // Initialize book cover previews
+    initBookCovers();
 });
 
 function initMapControls() {
@@ -1484,6 +1664,45 @@ function initMapControls() {
     document.getElementById('toggleLegend').addEventListener('click', function() {
         const legend = document.getElementById('mapLegend');
         legend.classList.toggle('show');
+    });
+    
+    // Toggle book covers
+    document.getElementById('toggleBookCovers').addEventListener('click', function() {
+        const covers = document.querySelectorAll('.book-cover-preview');
+        const isVisible = covers[0]?.style.display !== 'none';
+        
+        covers.forEach(cover => {
+            cover.style.display = isVisible ? 'none' : 'block';
+        });
+        
+        // Update button text
+        this.innerHTML = isVisible ? 
+            '<i class="fas fa-image"></i> Show Covers' : 
+            '<i class="fas fa-eye-slash"></i> Hide Covers';
+    });
+}
+
+function initBookCovers() {
+    // Book cover click handler
+    document.querySelectorAll('.book-cover-preview').forEach(cover => {
+        cover.addEventListener('click', function(e) {
+            e.stopPropagation();
+            const bookId = this.getAttribute('data-book-id');
+            const title = this.getAttribute('data-title');
+            const src = this.getAttribute('src');
+            showBookCoverModal(title, src, bookId);
+        });
+    });
+    
+    // Recommendation book cover click handler
+    document.querySelectorAll('.recommendation-book-cover').forEach(cover => {
+        cover.addEventListener('click', function(e) {
+            e.stopPropagation();
+            const bookId = this.getAttribute('data-book-id');
+            const title = this.closest('.recommendation-item').querySelector('.book-title').textContent;
+            const src = this.getAttribute('src');
+            showBookCoverModal(title, src, bookId);
+        });
     });
 }
 
@@ -1667,6 +1886,37 @@ function clearSelection() {
     });
 }
 
+function showBookCoverModal(title, coverSrc, bookId) {
+    const modal = document.getElementById('coverModal');
+    const content = document.getElementById('coverModalContent');
+    
+    let html = `
+        <div class="cover-modal-content">
+            <img src="${coverSrc}" alt="${escapeHtml(title)}" class="cover-large">
+            <h4 class="book-title-large">${escapeHtml(title)}</h4>
+    `;
+    
+    if (bookId) {
+        html += `
+            <div class="modal-actions">
+                <button class="btn btn-primary" onclick="window.open('manage_books.php?view=${bookId}', '_blank'); closeCoverModal();">
+                    <i class="fas fa-external-link-alt"></i> View Book Details
+                </button>
+            </div>
+        `;
+    }
+    
+    html += `</div>`;
+    
+    content.innerHTML = html;
+    document.getElementById('coverModalTitle').textContent = title;
+    modal.style.display = 'flex';
+}
+
+function closeCoverModal() {
+    document.getElementById('coverModal').style.display = 'none';
+}
+
 async function showSlotDetails(section, shelf, row, slot) {
     try {
         const response = await fetch(`../api/ai_recommendations.php?action=search_location&section=${section}`);
@@ -1697,30 +1947,46 @@ async function showSlotDetails(section, shelf, row, slot) {
                         <h4><i class="fas fa-book"></i> Book Information</h4>
                     </div>
                     <div class="card-body">
-                        <div class="book-info-grid">
-                            <div class="info-item">
-                                <label>Title</label>
-                                <p class="info-value">${escapeHtml(location.title)}</p>
-                            </div>
-                            <div class="info-item">
-                                <label>Author</label>
-                                <p class="info-value">${escapeHtml(location.author)}</p>
-                            </div>
-                            <div class="info-item">
-                                <label>Category</label>
-                                <span class="category-badge">${escapeHtml(location.category_name)}</span>
-                            </div>
-                            <div class="info-item">
-                                <label>Copy Number</label>
-                                <p class="info-value">${escapeHtml(location.copy_number)}</p>
-                            </div>
-                            <div class="info-item">
-                                <label>Status</label>
-                                <span class="status-badge status-${location.status}">${location.status}</span>
-                            </div>
-                            <div class="info-item">
-                                <label>Condition</label>
-                                <span class="condition-badge">${location.book_condition}</span>
+                        <div class="book-info-with-cover">
+            `;
+            
+            if (location.cover_image) {
+                html += `
+                    <div class="book-cover-sidebar">
+                        <img src="../uploads/covers/${escapeHtml(location.cover_image)}" 
+                             alt="${escapeHtml(location.title)}" 
+                             class="book-cover-detail"
+                             onclick="showBookCoverModal('${escapeHtml(location.title)}', '../uploads/covers/${escapeHtml(location.cover_image)}', ${location.book_id})">
+                    </div>
+                `;
+            }
+            
+            html += `
+                            <div class="book-info-grid">
+                                <div class="info-item">
+                                    <label>Title</label>
+                                    <p class="info-value">${escapeHtml(location.title)}</p>
+                                </div>
+                                <div class="info-item">
+                                    <label>Author</label>
+                                    <p class="info-value">${escapeHtml(location.author)}</p>
+                                </div>
+                                <div class="info-item">
+                                    <label>Category</label>
+                                    <span class="category-badge">${escapeHtml(location.category_name)}</span>
+                                </div>
+                                <div class="info-item">
+                                    <label>Copy Number</label>
+                                    <p class="info-value">${escapeHtml(location.copy_number)}</p>
+                                </div>
+                                <div class="info-item">
+                                    <label>Status</label>
+                                    <span class="status-badge status-${location.status}">${location.status}</span>
+                                </div>
+                                <div class="info-item">
+                                    <label>Condition</label>
+                                    <span class="condition-badge">${location.book_condition}</span>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -1728,6 +1994,9 @@ async function showSlotDetails(section, shelf, row, slot) {
                 <div class="action-buttons">
                     <button class="btn btn-outline" onclick="viewBookFromLocation(${location.book_id})">
                         <i class="fas fa-eye"></i> View Book Details
+                    </button>
+                    <button class="btn btn-outline" onclick="showBookCoverModal('${escapeHtml(location.title)}', '../uploads/covers/${escapeHtml(location.cover_image)}', ${location.book_id})">
+                        <i class="fas fa-image"></i> View Cover
                     </button>
                 </div>
             `;
@@ -2022,6 +2291,108 @@ style.textContent = `
     
     .notification-close:hover {
         opacity: 1;
+    }
+    
+    .book-info-with-cover {
+        display: flex;
+        gap: 1.5rem;
+        align-items: flex-start;
+    }
+    
+    .book-cover-sidebar {
+        flex-shrink: 0;
+    }
+    
+    .book-cover-detail {
+        width: 120px;
+        height: 160px;
+        object-fit: cover;
+        border-radius: 6px;
+        box-shadow: 0 3px 6px rgba(0,0,0,0.1);
+        cursor: pointer;
+        transition: transform 0.2s;
+    }
+    
+    .book-cover-detail:hover {
+        transform: scale(1.05);
+    }
+    
+    .book-info-grid {
+        flex: 1;
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 1rem;
+    }
+    
+    .info-item {
+        margin-bottom: 0.5rem;
+    }
+    
+    .info-item label {
+        display: block;
+        font-size: 0.75rem;
+        font-weight: 600;
+        color: #6b7280;
+        margin-bottom: 0.25rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    
+    .info-value {
+        margin: 0;
+        font-size: 0.875rem;
+        color: #1f2937;
+        font-weight: 500;
+    }
+    
+    .category-badge {
+        display: inline-block;
+        padding: 0.25rem 0.75rem;
+        background: #3b82f6;
+        color: white;
+        border-radius: 20px;
+        font-size: 0.75rem;
+        font-weight: 600;
+    }
+    
+    .status-badge {
+        display: inline-block;
+        padding: 0.25rem 0.75rem;
+        border-radius: 20px;
+        font-size: 0.75rem;
+        font-weight: 600;
+    }
+    
+    .status-available {
+        background: #d1fae5;
+        color: #065f46;
+    }
+    
+    .status-borrowed {
+        background: #fee2e2;
+        color: #991b1b;
+    }
+    
+    .status-reserved {
+        background: #fef3c7;
+        color: #92400e;
+    }
+    
+    .condition-badge {
+        display: inline-block;
+        padding: 0.25rem 0.75rem;
+        background: #e5e7eb;
+        color: #374151;
+        border-radius: 20px;
+        font-size: 0.75rem;
+        font-weight: 600;
+    }
+    
+    .modal-actions {
+        display: flex;
+        gap: 0.5rem;
+        justify-content: center;
+        margin-top: 1.5rem;
     }
 `;
 document.head.appendChild(style);
