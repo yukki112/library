@@ -18,6 +18,9 @@ $email = $u['email'] ?? '';
 $patron_id = $u['patron_id'] ?? 0;
 $roleLabel = ($u['role'] === 'non_staff') ? 'Non‑Teaching Staff' : 'Student';
 
+// Check if we have a book_id parameter from books.php
+$preSelectedBookId = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
+
 // Generate CSRF token for the page
 if (session_status() !== PHP_SESSION_ACTIVE) {
     session_start();
@@ -142,55 +145,83 @@ include __DIR__ . '/_header.php';
             <!-- Right Panel: Request Form -->
             <div class="right-panel">
                 <div class="request-form-section card">
-                    <div class="form-header">
-                        <h3>
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <path d="M12 5v14M5 12h14"/>
-                            </svg>
-                            Request Details
-                        </h3>
+                    <!-- Request Details Header -->
+                    <div class="request-details-header">
+                        <div class="request-details-title">
+                            <div class="request-details-icon">
+                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M12 5v14M5 12h14"/>
+                                </svg>
+                            </div>
+                            <div>
+                                <h3 class="request-details-heading">Request Details</h3>
+                                <p class="request-details-subtitle">Fill in your borrowing preferences</p>
+                            </div>
+                        </div>
                         <div class="user-badge">
                             <?php echo htmlspecialchars($roleLabel); ?>
                         </div>
                     </div>
 
-                    <div class="user-info">
-                        <div class="info-item">
-                            <span class="info-label">
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
-                                    <circle cx="12" cy="7" r="4"/>
-                                </svg>
-                                Username
-                            </span>
-                            <span class="info-value"><?php echo htmlspecialchars($username); ?></span>
+                    <!-- User Info Section - Enhanced -->
+                    <div class="user-info-section">
+                        <div class="user-info-header">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                                <circle cx="12" cy="7" r="4"/>
+                            </svg>
+                            <span>Your Information</span>
                         </div>
-                        <div class="info-item">
-                            <span class="info-label">
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <circle cx="12" cy="12" r="4"/>
-                                    <path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"/>
-                                </svg>
-                                Email
-                            </span>
-                            <span class="info-value"><?php echo htmlspecialchars($email); ?></span>
+                        <div class="user-info-grid">
+                            <div class="user-info-item">
+                                <div class="user-info-label">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                                        <circle cx="12" cy="7" r="4"/>
+                                    </svg>
+                                    Username
+                                </div>
+                                <div class="user-info-value"><?php echo htmlspecialchars($username); ?></div>
+                            </div>
+                            <div class="user-info-item">
+                                <div class="user-info-label">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <circle cx="12" cy="12" r="4"/>
+                                        <path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"/>
+                                    </svg>
+                                    Email
+                                </div>
+                                <div class="user-info-value"><?php echo htmlspecialchars($email); ?></div>
+                            </div>
                         </div>
                     </div>
 
                     <div id="requestForm">
-                        <!-- Selected Book Details -->
-                        <div id="selectedBookSection" class="selected-book-section" style="display: none;">
+                        <!-- Selected Book Details - ALWAYS VISIBLE IF BOOK IS PRESELECTED -->
+                        <div id="selectedBookSection" class="selected-book-section" 
+                             style="<?php echo $preSelectedBookId > 0 ? '' : 'display: none;'; ?>">
                             <div class="selected-book-header">
                                 <h4>Selected Book</h4>
+                                <?php if ($preSelectedBookId > 0): ?>
+                                <span class="preselected-label">Pre-selected from catalogue</span>
+                                <?php else: ?>
                                 <button type="button" class="btn-clear" onclick="clearSelection()">
                                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                         <path d="M18 6 6 18"/>
                                         <path d="m6 6 12 12"/>
                                     </svg>
-                                    Change
+                                    Change Book
                                 </button>
+                                <?php endif; ?>
                             </div>
-                            <div id="selectedBookCard" class="selected-book-card"></div>
+                            <div id="selectedBookCard" class="selected-book-card">
+                                <?php if ($preSelectedBookId > 0): ?>
+                                <div class="loading-state-small">
+                                    <div class="spinner-small"></div>
+                                    <p>Loading selected book...</p>
+                                </div>
+                                <?php endif; ?>
+                            </div>
                         </div>
 
                         <!-- Available Copies Selection -->
@@ -448,6 +479,7 @@ let currentPage = 1;
 const booksPerPage = 8;
 const csrfToken = '<?php echo $csrf_token; ?>';
 let lastSubmissionData = null;
+let preSelectedBookId = <?php echo $preSelectedBookId; ?>;
 
 // Initialize date fields
 function initializeDates() {
@@ -874,6 +906,19 @@ async function loadAvailableCopies(bookId) {
         
         // Store copy data for map display
         window.copyData = availableCopies;
+        
+        // Auto-select the first copy if only one is available
+        if (availableCopies.length === 1) {
+            const firstCopy = availableCopies[0];
+            selectCopy(firstCopy.id, 
+                document.querySelector('.copy-option'),
+                firstCopy.copy_number,
+                firstCopy.current_section || 'A',
+                firstCopy.current_shelf || 1,
+                firstCopy.current_row || 1,
+                firstCopy.current_slot || 1
+            );
+        }
         
     } catch (error) {
         console.error('Error loading copies:', error);
@@ -1760,12 +1805,50 @@ window.onclick = function(event) {
 // Initialize page
 document.addEventListener('DOMContentLoaded', () => {
     initializeDates();
-    searchBooks(1);
+    
+    // If we have a pre-selected book ID, load it immediately
+    if (preSelectedBookId > 0) {
+        selectBook(preSelectedBookId);
+    } else {
+        // Otherwise, load the book search
+        searchBooks(1);
+    }
 });
 </script>
 
 <style>
-/* Modern Design System - Updated with Map Styles */
+/* Add new CSS for pre-selected state */
+.preselected-label {
+    font-size: 0.85rem;
+    color: var(--success);
+    background: #d1fae5;
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-weight: 500;
+}
+
+.loading-state-small {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    text-align: center;
+}
+
+.spinner-small {
+    width: 30px;
+    height: 30px;
+    border: 2px solid var(--gray-200);
+    border-top: 2px solid var(--primary);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    margin-bottom: 10px;
+}
+
+/* Rest of your existing CSS remains exactly the same... */
+
+/* Modern Design System - Updated with Enhanced Request Details */
 :root {
     --primary: #4f46e5;
     --primary-dark: #4338ca;
@@ -2100,6 +2183,103 @@ document.addEventListener('DOMContentLoaded', () => {
 .btn-view-reservations:hover {
     background: var(--primary-dark);
     transform: translateY(-2px);
+}
+
+/* Enhanced Request Details Header */
+.request-details-header {
+    padding: 28px 24px;
+    border-bottom: 1px solid var(--gray-200);
+    background: linear-gradient(135deg, var(--primary-light), white);
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+}
+
+.request-details-title {
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+}
+
+.request-details-icon {
+    width: 48px;
+    height: 48px;
+    background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    flex-shrink: 0;
+}
+
+.request-details-heading {
+    margin: 0 0 6px 0;
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--gray-900);
+    line-height: 1.2;
+}
+
+.request-details-subtitle {
+    margin: 0;
+    color: var(--gray-600);
+    font-size: 0.95rem;
+}
+
+/* Enhanced User Info Section */
+.user-info-section {
+    padding: 24px;
+    border-bottom: 1px solid var(--gray-200);
+    background: var(--gray-50);
+}
+
+.user-info-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 20px;
+    font-weight: 600;
+    color: var(--gray-700);
+    font-size: 0.95rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.user-info-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 20px;
+}
+
+.user-info-item {
+    background: white;
+    border: 1px solid var(--gray-200);
+    border-radius: var(--radius);
+    padding: 16px;
+    transition: var(--transition);
+}
+
+.user-info-item:hover {
+    border-color: var(--primary);
+    box-shadow: var(--shadow-sm);
+}
+
+.user-info-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.875rem;
+    color: var(--gray-600);
+    margin-bottom: 8px;
+    font-weight: 500;
+}
+
+.user-info-value {
+    font-weight: 600;
+    color: var(--gray-900);
+    font-size: 1.1rem;
+    word-break: break-word;
 }
 
 /* Reservations List */
@@ -2896,65 +3076,6 @@ document.addEventListener('DOMContentLoaded', () => {
     height: fit-content;
 }
 
-.form-header {
-    padding: 24px;
-    border-bottom: 1px solid var(--gray-200);
-    background: linear-gradient(135deg, var(--primary-light), white);
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-}
-
-.form-header h3 {
-    margin: 0;
-    font-size: 1.25rem;
-    color: var(--gray-800);
-    display: flex;
-    align-items: center;
-    gap: 10px;
-}
-
-.user-badge {
-    background: var(--primary);
-    color: white;
-    padding: 6px 12px;
-    border-radius: 20px;
-    font-size: 0.75rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-}
-
-.user-info {
-    padding: 20px 24px;
-    border-bottom: 1px solid var(--gray-200);
-    background: var(--gray-50);
-}
-
-.info-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 12px;
-}
-
-.info-item:last-child {
-    margin-bottom: 0;
-}
-
-.info-label {
-    font-size: 0.875rem;
-    color: var(--gray-600);
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}
-
-.info-value {
-    font-weight: 600;
-    color: var(--gray-800);
-}
-
 /* Form Sections */
 #requestForm {
     padding: 24px;
@@ -3588,16 +3709,21 @@ document.addEventListener('DOMContentLoaded', () => {
         grid-template-columns: 1fr;
     }
     
-    .search-header,
-    .section-header,
-    .form-header {
-        padding: 16px;
+    .request-details-header {
+        padding: 20px 16px;
+        flex-direction: column;
+        gap: 16px;
     }
     
-    .search-box,
-    .user-info,
-    #requestForm {
-        padding: 16px;
+    .request-details-title {
+        flex-direction: column;
+        align-items: center;
+        text-align: center;
+        gap: 12px;
+    }
+    
+    .user-info-grid {
+        grid-template-columns: 1fr;
     }
     
     .selected-book-info {

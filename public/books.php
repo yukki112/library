@@ -13,6 +13,16 @@ if (!in_array($u['role'], ['student','non_staff'], true)) {
     exit;
 }
 
+// Start session if not already started for CSRF
+if (session_status() !== PHP_SESSION_ACTIVE) {
+    session_start();
+}
+
+// Generate CSRF token if not exists
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+
 include __DIR__ . '/_header.php';
 
 // Get database connection
@@ -135,7 +145,7 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
                 coverImage = '../uploads/covers/' + data.cover_image;
             }
             
-            // Render book details - REMOVED RATING STARS
+            // Render book details
             container.innerHTML = `
                 <div class="book-detail-card">
                     <div class="book-cover-section">
@@ -151,15 +161,15 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
                         
                         <div class="quick-actions">
                             <?php if ($u['role'] === 'student'): ?>
-                            <button id="btnRequestBook" class="btn-action-primary">
+                            <a href="request_book.php?book_id=${bookId}&csrf_token=<?php echo urlencode($_SESSION['csrf_token']); ?>" 
+                               id="btnRequestBook" class="btn-action-primary">
                                 <span class="btn-icon">
                                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                         <path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/>
                                     </svg>
                                 </span>
                                 <span class="btn-text">Request Book</span>
-                                <span class="btn-loader"></span>
-                            </button>
+                            </a>
                             <?php endif; ?>
                             
                             <button onclick="openMapModal()" class="btn-action-secondary">
@@ -330,44 +340,24 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
                                                 <path d="M12 5v14M5 12h14"/>
                                             </svg>
                                         </span>
-                                        Request Options
+                                        Request This Book
                                     </h3>
                                 </div>
-                                <div id="requestForm" class="request-form">
-                                    <div class="form-row">
-                                        <div class="form-group">
-                                            <label for="selectedCopy" class="form-label">
-                                                Select Copy
-                                            </label>
-                                            <select id="selectedCopy" class="form-select">
-                                                <option value="">Any available copy</option>
-                                            </select>
+                                <div class="quick-request-form">
+                                    <div class="form-group">
+                                        <label class="form-label">Quick Action</label>
+                                        <div class="quick-action-buttons">
+                                            <a href="request_book.php?book_id=${bookId}&csrf_token=<?php echo urlencode($_SESSION['csrf_token']); ?>" 
+                                               class="btn-action-primary">
+                                                <span class="btn-icon">
+                                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                        <path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/>
+                                                    </svg>
+                                                </span>
+                                                Request Book
+                                            </a>
                                         </div>
-                                        
-                                        <div class="form-group">
-                                            <label for="borrowDays" class="form-label">
-                                                Duration
-                                            </label>
-                                            <select id="borrowDays" class="form-select">
-                                                <option value="7">7 days</option>
-                                                <option value="14" selected>14 days</option>
-                                                <option value="21">21 days</option>
-                                            </select>
-                                        </div>
-                                    </div>
-                                    
-                                    <div id="requestMessage" class="message-container"></div>
-                                    
-                                    <div class="form-actions">
-                                        <button onclick="requestBook(${bookId})" class="btn-action-primary">
-                                            <span class="btn-icon">
-                                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                                    <path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/>
-                                                </svg>
-                                            </span>
-                                            <span class="btn-text">Request Book</span>
-                                            <span class="btn-loader"></span>
-                                        </button>
+                                        <small class="form-hint">This will take you to the request page where you can select a copy and choose dates</small>
                                     </div>
                                 </div>
                             </div>
@@ -412,26 +402,24 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
                 return;
             }
             
-            // Filter available copies
+            // Filter available copies only for the list
             const availableCopies = currentBookCopies.filter(copy => copy.status === 'available');
             
             if (availableCopies.length === 0) {
                 copiesList.innerHTML = '<div class="empty-state warning"><p>No copies currently available</p></div>';
-                const copySelect = document.getElementById('selectedCopy');
-                if (copySelect) {
-                    copySelect.innerHTML = '<option value="">No copies available</option>';
-                    copySelect.disabled = true;
-                }
                 return;
             }
             
-            // Populate copies list
+            // Populate copies list with only available copies
             copiesList.innerHTML = availableCopies.map(copy => `
-                <div class="copy-item" onclick="showCopyOnMap('${escapeHtml(copy.current_section || 'A')}', ${escapeHtml(copy.current_shelf || '1')}, ${escapeHtml(copy.current_row || '1')}, ${escapeHtml(copy.current_slot || '1')}, '${escapeHtml(copy.copy_number)}')">
+                <div class="copy-item" onclick="showCopyOnMap('${escapeHtml(copy.current_section || 'A')}', ${escapeHtml(copy.current_shelf || '1')}, ${escapeHtml(copy.current_row || '1')}, ${escapeHtml(copy.current_slot || '1')}, '${escapeHtml(copy.copy_number)}', '${escapeHtml(copy.status)}')">
                     <div class="copy-header">
                         <span class="copy-id">${escapeHtml(copy.copy_number)}</span>
                         <span class="copy-badge condition-${copy.book_condition || 'good'}">
                             ${escapeHtml(copy.book_condition || 'Good')}
+                        </span>
+                        <span class="copy-status-badge status-${copy.status}">
+                            ${escapeHtml(copy.status)}
                         </span>
                     </div>
                     <div class="copy-info">
@@ -443,7 +431,7 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
                         </div>
                         <div class="copy-barcode">${escapeHtml(copy.barcode || 'N/A')}</div>
                     </div>
-                    <button class="btn-show-on-map" onclick="event.stopPropagation(); showCopyOnMap('${escapeHtml(copy.current_section || 'A')}', ${escapeHtml(copy.current_shelf || '1')}, ${escapeHtml(copy.current_row || '1')}, ${escapeHtml(copy.current_slot || '1')}, '${escapeHtml(copy.copy_number)}')">
+                    <button class="btn-show-on-map" onclick="event.stopPropagation(); showCopyOnMap('${escapeHtml(copy.current_section || 'A')}', ${escapeHtml(copy.current_shelf || '1')}, ${escapeHtml(copy.current_row || '1')}, ${escapeHtml(copy.current_slot || '1')}, '${escapeHtml(copy.copy_number)}', '${escapeHtml(copy.status)}')">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
                             <circle cx="12" cy="10" r="3"/>
@@ -452,16 +440,6 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
                     </button>
                 </div>
             `).join('');
-            
-            // Populate copy select dropdown
-            const copySelect = document.getElementById('selectedCopy');
-            if (copySelect) {
-                copySelect.innerHTML = '<option value="">Any available copy</option>' +
-                    availableCopies.map(copy => 
-                        `<option value="${copy.id}">Copy ${copy.copy_number} - ${copy.current_section || 'A'}-S${copy.current_shelf || '1'}-R${copy.current_row || '1'}-P${copy.current_slot || '1'}</option>`
-                    ).join('');
-                copySelect.disabled = false;
-            }
             
         } catch (error) {
             console.error('Error loading book copies:', error);
@@ -571,14 +549,50 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
                                 
                                 const isCurrentBookLocation = !!currentCopy;
                                 const copyNumber = currentCopy ? currentCopy.copy_number : '';
+                                const copyStatus = currentCopy ? currentCopy.status : '';
                                 
                                 const slotClasses = ['slot-modal'];
                                 if (isCurrentBookLocation) {
                                     slotClasses.push('current-book');
+                                    
+                                    // Add status-specific classes
+                                    if (copyStatus === 'available') {
+                                        slotClasses.push('status-available');
+                                    } else if (copyStatus === 'borrowed') {
+                                        slotClasses.push('status-borrowed');
+                                    } else if (copyStatus === 'reserved') {
+                                        slotClasses.push('status-reserved');
+                                    }
                                 } else if (containsBook) {
                                     slotClasses.push('empty');
                                 } else {
                                     slotClasses.push('occupied');
+                                }
+                                
+                                // Determine symbol based on status
+                                let slotSymbol = '';
+                                let slotTitle = '';
+                                
+                                if (isCurrentBookLocation) {
+                                    switch(copyStatus) {
+                                        case 'available':
+                                            slotSymbol = '✓';
+                                            slotTitle = 'Available - ' + copyNumber;
+                                            break;
+                                        case 'borrowed':
+                                            slotSymbol = '⇪';
+                                            slotTitle = 'Borrowed - ' + copyNumber;
+                                            break;
+                                        case 'reserved':
+                                            slotSymbol = '⏳';
+                                            slotTitle = 'Reserved - ' + copyNumber;
+                                            break;
+                                        default:
+                                            slotSymbol = '★';
+                                            slotTitle = 'Current Book - ' + copyNumber;
+                                    }
+                                } else {
+                                    slotTitle = containsBook ? 'Empty' : 'Other Books';
                                 }
                                 
                                 mapHTML += `
@@ -588,9 +602,10 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
                                          data-row="${row}"
                                          data-slot="${slot}"
                                          data-copy="${copyNumber}"
-                                         title="${isCurrentBookLocation ? 'Current Book' : containsBook ? 'Empty' : 'Other Books'}"
-                                         onclick="handleModalSlotClick('${sectionCode}', ${shelf}, ${row}, ${slot}, '${copyNumber}')">
-                                        ${isCurrentBookLocation ? '★' : ''}
+                                         data-status="${copyStatus}"
+                                         title="${slotTitle}"
+                                         onclick="handleModalSlotClick('${sectionCode}', ${shelf}, ${row}, ${slot}, '${copyNumber}', '${copyStatus}')">
+                                        ${slotSymbol}
                                     </div>
                                 `;
                             }
@@ -619,12 +634,20 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
             mapHTML += '</div>';
             mapContainer.innerHTML = mapHTML;
             
-            // Create legend
+            // Create enhanced legend
             legendContainer.innerHTML = `
                 <div class="legend-modal">
                     <div class="legend-item-modal">
-                        <div class="legend-color-modal current-book"></div>
-                        <span>Current Book (★)</span>
+                        <div class="legend-color-modal current-book status-available"></div>
+                        <span>Available (✓)</span>
+                    </div>
+                    <div class="legend-item-modal">
+                        <div class="legend-color-modal current-book status-borrowed"></div>
+                        <span>Borrowed (⇪)</span>
+                    </div>
+                    <div class="legend-item-modal">
+                        <div class="legend-color-modal current-book status-reserved"></div>
+                        <span>Reserved (⏳)</span>
                     </div>
                     <div class="legend-item-modal">
                         <div class="legend-color-modal occupied"></div>
@@ -640,10 +663,14 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
             // Add hover effects
             document.querySelectorAll('.slot-modal').forEach(slot => {
                 slot.addEventListener('mouseenter', function() {
-                    if (this.classList.contains('current-book')) {
-                        this.style.boxShadow = '0 0 0 3px #fbbf24, 0 0 20px rgba(251, 191, 36, 0.3)';
+                    if (this.classList.contains('status-available')) {
+                        this.style.boxShadow = '0 0 0 3px #10b981, 0 0 20px rgba(16, 185, 129, 0.3)';
+                    } else if (this.classList.contains('status-borrowed')) {
+                        this.style.boxShadow = '0 0 0 3px #ef4444, 0 0 20px rgba(239, 68, 68, 0.3)';
+                    } else if (this.classList.contains('status-reserved')) {
+                        this.style.boxShadow = '0 0 0 3px #f59e0b, 0 0 20px rgba(245, 158, 11, 0.3)';
                     } else if (this.classList.contains('occupied')) {
-                        this.style.boxShadow = '0 0 0 2px #10b981, 0 0 15px rgba(16, 185, 129, 0.2)';
+                        this.style.boxShadow = '0 0 0 2px #6b7280, 0 0 15px rgba(107, 114, 128, 0.2)';
                     } else {
                         this.style.boxShadow = '0 0 0 2px #3b82f6, 0 0 10px rgba(59, 130, 246, 0.1)';
                     }
@@ -665,14 +692,14 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
         }
     }
     
-    function showCopyOnMap(section, shelf, row, slot, copyNumber) {
+    function showCopyOnMap(section, shelf, row, slot, copyNumber, copyStatus) {
         openMapModal();
         setTimeout(() => {
-            highlightLocation(section, shelf, row, slot, copyNumber);
+            highlightLocation(section, shelf, row, slot, copyNumber, copyStatus);
         }, 300);
     }
     
-    function highlightLocation(section, shelf, row, slot, copyNumber) {
+    function highlightLocation(section, shelf, row, slot, copyNumber, copyStatus) {
         // Remove all highlights first
         document.querySelectorAll('.slot-modal').forEach(s => {
             s.classList.remove('highlighted');
@@ -692,11 +719,88 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
                 inline: 'center'
             });
             
-            // Add pulsing animation
-            targetSlot.style.animation = 'pulse-highlight 2s infinite';
+            // Add appropriate pulsing animation based on status
+            let animationColor = '#fbbf24'; // Default yellow
+            if (copyStatus === 'available') {
+                animationColor = '#10b981'; // Green
+            } else if (copyStatus === 'borrowed') {
+                animationColor = '#ef4444'; // Red
+            } else if (copyStatus === 'reserved') {
+                animationColor = '#f59e0b'; // Orange
+            }
+            
+            targetSlot.style.animation = `pulse-highlight-${copyStatus || 'default'} 2s infinite`;
+            
+            // Create style for different status animations
+            if (!document.getElementById('statusAnimations')) {
+                const style = document.createElement('style');
+                style.id = 'statusAnimations';
+                style.textContent = `
+                    @keyframes pulse-highlight-available {
+                        0%, 100% { 
+                            box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
+                            transform: scale(1.2);
+                        }
+                        50% { 
+                            box-shadow: 0 0 0 10px rgba(16, 185, 129, 0);
+                            transform: scale(1.3);
+                        }
+                    }
+                    @keyframes pulse-highlight-borrowed {
+                        0%, 100% { 
+                            box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);
+                            transform: scale(1.2);
+                        }
+                        50% { 
+                            box-shadow: 0 0 0 10px rgba(239, 68, 68, 0);
+                            transform: scale(1.3);
+                        }
+                    }
+                    @keyframes pulse-highlight-reserved {
+                        0%, 100% { 
+                            box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.7);
+                            transform: scale(1.2);
+                        }
+                        50% { 
+                            box-shadow: 0 0 0 10px rgba(245, 158, 11, 0);
+                            transform: scale(1.3);
+                        }
+                    }
+                    @keyframes pulse-highlight-default {
+                        0%, 100% { 
+                            box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.7);
+                            transform: scale(1.2);
+                        }
+                        50% { 
+                            box-shadow: 0 0 0 10px rgba(251, 191, 36, 0);
+                            transform: scale(1.3);
+                        }
+                    }
+                `;
+                document.head.appendChild(style);
+            }
             
             // Show location details
             const locationDetails = document.getElementById('locationDetails');
+            
+            // Get status display text and color
+            let statusText = copyStatus || 'Unknown';
+            let statusColor = '#6b7280'; // Default gray
+            switch(copyStatus) {
+                case 'available':
+                    statusText = 'Available';
+                    statusColor = '#10b981';
+                    break;
+                case 'borrowed':
+                    statusText = 'Borrowed';
+                    statusColor = '#ef4444';
+                    break;
+                case 'reserved':
+                    statusText = 'Reserved';
+                    statusColor = '#f59e0b';
+                    break;
+            }
+            
             locationDetails.innerHTML = `
                 <div class="location-detail-card">
                     <div class="location-detail-header">
@@ -724,93 +828,32 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
                             <span class="detail-label">Copy Number:</span>
                             <span class="detail-value">${copyNumber}</span>
                         </div>` : ''}
+                        <div class="detail-item">
+                            <span class="detail-label">Status:</span>
+                            <span class="detail-value" style="color: ${statusColor}; font-weight: bold;">
+                                ${statusText}
+                            </span>
+                        </div>
+                        ${copyStatus === 'borrowed' ? `<div class="detail-item">
+                            <span class="detail-label">Note:</span>
+                            <span class="detail-value" style="color: #ef4444; font-size: 0.9rem;">
+                                This copy is currently borrowed and unavailable
+                            </span>
+                        </div>` : ''}
+                        ${copyStatus === 'reserved' ? `<div class="detail-item">
+                            <span class="detail-label">Note:</span>
+                            <span class="detail-value" style="color: #f59e0b; font-size: 0.9rem;">
+                                This copy is reserved and unavailable
+                            </span>
+                        </div>` : ''}
                     </div>
                 </div>
             `;
         }
     }
     
-    function handleModalSlotClick(section, shelf, row, slot, copyNumber) {
-        highlightLocation(section, shelf, row, slot, copyNumber);
-    }
-    
-    async function requestBook(bookId) {
-        const copySelect = document.getElementById('selectedCopy');
-        const copyId = copySelect ? copySelect.value : '';
-        const days = document.getElementById('borrowDays').value;
-        const messageDiv = document.getElementById('requestMessage');
-        
-        // Clear previous messages
-        messageDiv.innerHTML = '';
-        
-        // Validate
-        if (!copyId) {
-            messageDiv.innerHTML = '<div class="alert alert-warning"><div>Please select a specific copy to borrow</div></div>';
-            return;
-        }
-        
-        const btn = document.querySelector('#requestForm .btn-action-primary');
-        const originalText = btn.innerHTML;
-        btn.classList.add('loading');
-        btn.disabled = true;
-        
-        try {
-            // Create a reservation for the book
-            const reservationData = {
-                book_id: bookId,
-                book_copy_id: copyId,
-                patron_id: <?php echo $u['patron_id'] ?? 0; ?>,
-                reservation_type: 'specific_copy',
-                status: 'pending'
-            };
-            
-            const res = await fetch('../api/dispatch.php?resource=reservations', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify(reservationData)
-            });
-            
-            const result = await res.json();
-            
-            if (result.id) {
-                messageDiv.innerHTML = `
-                    <div class="alert alert-success">
-                        <div>
-                            <strong>Request Submitted Successfully!</strong>
-                            <p>Your book request has been submitted and is pending approval.</p>
-                            <p class="reference"><small>Reservation ID: ${escapeHtml(result.id)}</small></p>
-                        </div>
-                    </div>
-                `;
-                
-                // Refresh copy list after successful request
-                setTimeout(() => loadBookCopies(bookId), 2000);
-            } else {
-                messageDiv.innerHTML = `
-                    <div class="alert alert-error">
-                        <div>
-                            <strong>Request Failed</strong>
-                            <p>${escapeHtml(result.error || 'Unknown error occurred')}</p>
-                        </div>
-                    </div>
-                `;
-            }
-        } catch (error) {
-            messageDiv.innerHTML = `
-                <div class="alert alert-error">
-                    <div>
-                        <strong>Network Error</strong>
-                        <p>Please check your connection and try again</p>
-                    </div>
-                </div>
-            `;
-            console.error('Request error:', error);
-        } finally {
-            btn.classList.remove('loading');
-            btn.disabled = false;
-        }
+    function handleModalSlotClick(section, shelf, row, slot, copyNumber, copyStatus) {
+        highlightLocation(section, shelf, row, slot, copyNumber, copyStatus);
     }
     
     function escapeHtml(s) {
@@ -1342,6 +1385,103 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
 </div>
 
 <style>
+/* Add new CSS for copy status badges and map symbols */
+.copy-status-badge {
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.copy-status-badge.status-available {
+    background: #dcfce7;
+    color: #166534;
+    border: 1px solid #86efac;
+}
+
+.copy-status-badge.status-borrowed {
+    background: #fee2e2;
+    color: #991b1b;
+    border: 1px solid #fca5a5;
+}
+
+.copy-status-badge.status-reserved {
+    background: #fef3c7;
+    color: #92400e;
+    border: 1px solid #fde68a;
+}
+
+.copy-status-badge.status-lost {
+    background: #e5e7eb;
+    color: #374151;
+    border: 1px solid #d1d5db;
+}
+
+.copy-status-badge.status-damaged {
+    background: #f3f4f6;
+    color: #6b7280;
+    border: 1px solid #e5e7eb;
+}
+
+/* Map slot status styles */
+.slot-modal.status-available {
+    background: #dcfce7;
+    border-color: #86efac;
+    color: #166534;
+    font-weight: bold;
+}
+
+.slot-modal.status-borrowed {
+    background: #fee2e2;
+    border-color: #fca5a5;
+    color: #991b1b;
+    font-weight: bold;
+}
+
+.slot-modal.status-reserved {
+    background: #fef3c7;
+    border-color: #fde68a;
+    color: #92400e;
+    font-weight: bold;
+}
+
+.legend-color-modal.current-book.status-available {
+    background: #dcfce7;
+    border-color: #86efac;
+}
+
+.legend-color-modal.current-book.status-borrowed {
+    background: #fee2e2;
+    border-color: #fca5a5;
+}
+
+.legend-color-modal.current-book.status-reserved {
+    background: #fef3c7;
+    border-color: #fde68a;
+}
+
+/* Rest of your CSS remains the same... */
+
+/* Add new CSS for quick request form */
+.quick-request-form {
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+    padding: 15px;
+}
+
+.quick-action-buttons {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.quick-request-form .btn-action-primary {
+    width: 100%;
+    justify-content: center;
+}
+
 /* Modern Design System */
 :root {
     --primary: #4f46e5;
@@ -1871,6 +2011,7 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
     transition: var(--transition);
     width: 100%;
     justify-content: center;
+    text-decoration: none;
 }
 
 .btn-action-primary:hover {
@@ -2204,7 +2345,7 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
     border-bottom: 1px solid var(--gray-200);
 }
 
-.request-form {
+.quick-request-form {
     display: flex;
     flex-direction: column;
     gap: 20px;
