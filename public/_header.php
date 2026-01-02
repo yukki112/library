@@ -46,7 +46,7 @@ $user = current_user();
                     ['Top Users','top_users.php','fa-users',['admin','librarian','assistant']],
                     ['Student Information','student_information.php','fa-user-graduate',['admin','librarian','assistant']],
                     ['Manage User','manage_user.php','fa-users',['admin','librarian','assistant']],
-                    ['Message Admin','send_message_admin.php','fa-comment',['student','non_staff']],
+                    ['ChatBot','send_message_admin.php','fa-comment',['student','non_staff']],
                     ['Analytics','reports_analytics.php','fa-chart-line',['admin','librarian']],
                     ['Audit Logs','audit.php','fa-shield-halved',['admin','librarian','assistant']],
                     ['Profile','profile_details.php','fa-user',['admin','librarian','assistant','student','non_staff']],

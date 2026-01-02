@@ -9,31 +9,15 @@ require_once __DIR__ . '/../includes/settings.php';
 
 // -----------------------------------------------------------------------------
 // Robust error handling
-//
-// The API endpoints should always return valid JSON.  However, if a PHP
-// warning or exception bubbles up (for example, due to a database
-// misconfiguration or a missing table) PHP will by default emit an HTML error
-// page.  The frontend expects JSON and will fail to parse the response,
-// resulting in errors like "Unexpected token '<'".  To prevent that, we
-// register global error and exception handlers up front.  Any uncaught
-// exception or warning will be translated into a JSON error response.  This
-// keeps the API contract consistent and makes debugging easier.
 set_exception_handler(function (Throwable $e): void {
     http_response_code(500);
     header('Content-Type: application/json');
-    // Do not leak sensitive details in production; include message for easier
-    // debugging in development.  Prefix with a generic label so clients can
-    // display a friendly error.
     $msg = $e->getMessage();
     echo json_encode(['error' => 'Server error: ' . $msg], JSON_UNESCAPED_UNICODE);
     exit;
 });
 
 set_error_handler(function (int $errno, string $errstr, string $errfile, int $errline): void {
-    // Convert all errors to exceptions so they are handled uniformly by the
-    // exception handler above.  Triggering an exception here ensures that
-    // fatal errors such as undefined variables or database warnings are
-    // reported as JSON.
     throw new ErrorException($errstr, 0, $errno, $errfile, $errline);
 });
 
@@ -51,16 +35,11 @@ if (!$resource) {
 $RESOURCES = [
     'users' => [
         'table' => 'users',
-        // Allow updates to address in addition to existing fields.  Password is
-        // accepted but is hashed before storage in the POST/PUT logic.
         'fields' => ['username','email','name','phone','address','role','status','password'],
         'defaults' => ['status' => 'active'],
     ],
     'patrons' => [
         'table' => 'patrons',
-        // Accept semester, department and address fields on patrons so that
-        // student academic information can be maintained.  These fields are
-        // optional when creating or updating patrons.
         'fields' => ['name','library_id','email','phone','semester','department','address','membership_date','status'],
         'defaults' => ['status' => 'active'],
     ],
@@ -81,9 +60,7 @@ $RESOURCES = [
     ],
     'reservations' => [
         'table' => 'reservations',
-        // Permit an optional `reason` field used to record why a reservation was declined.
-        'fields' => ['book_id','patron_id','reserved_at','status','expiration_date','reason'],
-        // Reservations now default to a "pending" status so that staff can review and approve or decline
+        'fields' => ['book_id','book_copy_id','patron_id','reserved_at','status','expiration_date','reason','reservation_type','notes'],
         'defaults' => ['status' => 'pending'],
     ],
     'lost_damaged_reports' => [
@@ -91,16 +68,6 @@ $RESOURCES = [
         'fields' => ['book_id','patron_id','report_date','report_type','severity','description','fee_charged','status'],
         'defaults' => ['status' => 'pending'],
     ],
-
-    // E‑Book access requests.  Students and non‑teaching staff submit
-    // a request to access the library's e‑book collection.  The request
-    // is stored in the ebook_requests table and must be approved by a
-    // staff member.  Only the status may be updated after creation.
-    // E‑book access requests.  Each request now stores the username of the
-    // requester and the optional book being requested rather than a
-    // patron_id.  This allows the system to decouple from the patrons
-    // table and simplifies the UI.  The request_date and action fields are
-    // exposed for creation/update.
     'ebook_requests' => [
         'table' => 'ebook_requests',
         'fields' => ['book_id','username','request_date','status','action'],
@@ -111,7 +78,288 @@ $RESOURCES = [
         'fields' => ['patron_id','clearance_date','status','notes'],
         'defaults' => ['status' => 'pending'],
     ],
+    'book_copies' => [
+        'table' => 'book_copies',
+        'fields' => ['book_id','copy_number','barcode','status','current_section','current_shelf','current_row','current_slot','acquisition_date','purchase_price','book_condition','notes','is_active'],
+        'defaults' => ['status' => 'available', 'is_active' => 1],
+    ],
+    'library_map_config' => [
+        'table' => 'library_map_config',
+        'fields' => ['section','shelf_count','rows_per_shelf','slots_per_row','x_position','y_position','color','is_active'],
+        'defaults' => ['is_active' => 1],
+    ],
+    'categories' => [
+        'table' => 'categories',
+        'fields' => ['name','description','section_code','default_section','shelf_recommendation','row_recommendation','slot_recommendation','is_active'],
+        'defaults' => ['is_active' => 1],
+    ],
 ];
+
+// NEW: Special API endpoints for book details
+if (in_array($resource, ['book-details', 'book-copies', 'book-locations', 'library-sections'])) {
+    // Handle book details API endpoints
+    $pdo = DB::conn();
+    
+    switch ($resource) {
+        case 'book-details':
+            if (!$id) {
+                json_response(['error' => 'Book ID required'], 400);
+            }
+            
+            try {
+                // Get book details
+                $stmt = $pdo->prepare("
+                    SELECT b.*, c.name as category_name, c.default_section
+                    FROM books b
+                    LEFT JOIN categories c ON b.category_id = c.id
+                    WHERE b.id = ? AND b.is_active = 1
+                ");
+                $stmt->execute([$id]);
+                $book = $stmt->fetch(PDO::FETCH_ASSOC);
+                
+                if (!$book) {
+                    json_response(['error' => 'Book not found'], 404);
+                }
+                
+                // Get available copies count - FIXED: Properly count available copies
+                $stmt = $pdo->prepare("
+                    SELECT COUNT(*) as available_count
+                    FROM book_copies
+                    WHERE book_id = ? AND status = 'available' AND is_active = 1
+                ");
+                $stmt->execute([$id]);
+                $available = $stmt->fetch(PDO::FETCH_ASSOC);
+                
+                // Get total copies count
+                $stmt = $pdo->prepare("
+                    SELECT COUNT(*) as total_count
+                    FROM book_copies
+                    WHERE book_id = ? AND is_active = 1
+                ");
+                $stmt->execute([$id]);
+                $total = $stmt->fetch(PDO::FETCH_ASSOC);
+                
+                $book['available_copies'] = $available['available_count'] ?? 0;
+                $book['total_copies'] = $total['total_count'] ?? 0;
+                
+                // Update cache if different
+                if ($book['available_copies_cache'] != $book['available_copies'] || 
+                    $book['total_copies_cache'] != $book['total_copies']) {
+                    $updateStmt = $pdo->prepare("
+                        UPDATE books 
+                        SET available_copies_cache = ?, total_copies_cache = ?
+                        WHERE id = ?
+                    ");
+                    $updateStmt->execute([
+                        $book['available_copies'],
+                        $book['total_copies'],
+                        $id
+                    ]);
+                }
+                
+                json_response($book);
+                
+            } catch (Exception $e) {
+                json_response(['error' => 'Database error: ' . $e->getMessage()], 500);
+            }
+            break;
+            
+        case 'book-copies':
+            $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
+            if (!$book_id) {
+                json_response(['error' => 'Book ID required'], 400);
+            }
+            
+            try {
+                $stmt = $pdo->prepare("
+                    SELECT id, copy_number, barcode, status, 
+                           current_section, current_shelf, current_row, current_slot,
+                           book_condition
+                    FROM book_copies
+                    WHERE book_id = ? AND is_active = 1
+                    ORDER BY copy_number
+                ");
+                $stmt->execute([$book_id]);
+                $copies = $stmt->fetchAll(PDO::FETCH_ASSOC);
+                
+                json_response($copies);
+                
+            } catch (Exception $e) {
+                json_response(['error' => 'Database error: ' . $e->getMessage()], 500);
+            }
+            break;
+            
+        case 'book-locations':
+            $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
+            if (!$book_id) {
+                json_response(['error' => 'Book ID required'], 400);
+            }
+            
+            try {
+                // Get sections where this book is located
+                $stmt = $pdo->prepare("
+                    SELECT DISTINCT bc.current_section
+                    FROM book_copies bc
+                    WHERE bc.book_id = ? AND bc.status = 'available' 
+                          AND bc.current_section IS NOT NULL
+                    ORDER BY bc.current_section
+                ");
+                $stmt->execute([$book_id]);
+                $bookSections = $stmt->fetchAll(PDO::FETCH_COLUMN, 0);
+                
+                // Get all library sections
+                $stmt = $pdo->query("
+                    SELECT section, x_position as x, y_position as y, color
+                    FROM library_map_config
+                    WHERE is_active = 1
+                    ORDER BY section
+                ");
+                $sections = $stmt->fetchAll(PDO::FETCH_ASSOC);
+                
+                // Add book location flag
+                foreach ($sections as &$section) {
+                    $section['containsBook'] = in_array($section['section'], $bookSections);
+                }
+                
+                json_response([
+                    'sections' => $sections,
+                    'book_sections' => $bookSections
+                ]);
+                
+            } catch (Exception $e) {
+                json_response(['error' => 'Database error: ' . $e->getMessage()], 500);
+            }
+            break;
+            
+        case 'library-sections':
+            try {
+                $stmt = $pdo->query("
+                    SELECT section, shelf_count, rows_per_shelf, slots_per_row, color
+                    FROM library_map_config
+                    WHERE is_active = 1
+                    ORDER BY section
+                ");
+                $sections = $stmt->fetchAll(PDO::FETCH_ASSOC);
+                
+                json_response($sections);
+                
+            } catch (Exception $e) {
+                json_response(['error' => 'Database error: ' . $e->getMessage()], 500);
+            }
+            break;
+    }
+    
+    exit;
+}
+
+// NEW: Search endpoint for books - FIXED: Include proper available copies count
+if ($resource === 'books' && isset($_GET['search'])) {
+    $pdo = DB::conn();
+    $search = $_GET['search'] ?? '';
+    $category = $_GET['category'] ?? '';
+    $available_only = isset($_GET['available_only']) ? $_GET['available_only'] : '';
+    
+    try {
+        $query = "SELECT b.*, c.name as category_name FROM books b 
+                  LEFT JOIN categories c ON b.category_id = c.id 
+                  WHERE b.is_active = 1";
+        
+        $params = [];
+        
+        if (!empty($search)) {
+            $query .= " AND (b.title LIKE ? OR b.author LIKE ? OR b.isbn LIKE ?)";
+            $searchTerm = "%$search%";
+            $params = array_merge($params, [$searchTerm, $searchTerm, $searchTerm]);
+        }
+        
+        if (!empty($category)) {
+            $query .= " AND b.category_id = ?";
+            $params[] = $category;
+        }
+        
+        if ($available_only === '1') {
+            $query .= " AND b.available_copies_cache > 0";
+        }
+        
+        $query .= " ORDER BY b.title";
+        
+        $stmt = $pdo->prepare($query);
+        $stmt->execute($params);
+        $books = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        
+        // Ensure available_copies_cache is accurate
+        foreach ($books as &$book) {
+            // Recalculate if cache seems off
+            if ($book['available_copies_cache'] < 0 || $book['available_copies_cache'] > $book['total_copies_cache']) {
+                $countStmt = $pdo->prepare("
+                    SELECT COUNT(*) as available_count
+                    FROM book_copies
+                    WHERE book_id = ? AND status = 'available' AND is_active = 1
+                ");
+                $countStmt->execute([$book['id']]);
+                $available = $countStmt->fetch(PDO::FETCH_ASSOC);
+                
+                $book['available_copies_cache'] = $available['available_count'] ?? 0;
+                
+                // Update cache
+                $updateStmt = $pdo->prepare("
+                    UPDATE books SET available_copies_cache = ? WHERE id = ?
+                ");
+                $updateStmt->execute([$book['available_copies_cache'], $book['id']]);
+            }
+        }
+        
+        json_response($books);
+        
+    } catch (Exception $e) {
+        json_response(['error' => 'Database error: ' . $e->getMessage()], 500);
+    }
+    exit;
+}
+
+// NEW: User reservations endpoint
+if ($resource === 'user-reservations') {
+    $pdo = DB::conn();
+    $user = current_user();
+    
+    if (!$user) {
+        json_response(['error' => 'Not authenticated'], 401);
+    }
+    
+    $patron_id = $user['patron_id'] ?? 0;
+    
+    if (!$patron_id) {
+        json_response(['error' => 'No patron account linked'], 400);
+    }
+    
+    try {
+        $stmt = $pdo->prepare("
+            SELECT r.*, 
+                   b.title as book_title, 
+                   b.author as book_author,
+                   b.isbn as book_isbn,
+                   bc.copy_number as copy_number,
+                   bc.barcode as barcode,
+                   bc.current_section,
+                   bc.current_shelf,
+                   bc.current_row,
+                   bc.current_slot
+            FROM reservations r
+            LEFT JOIN books b ON r.book_id = b.id
+            LEFT JOIN book_copies bc ON r.book_copy_id = bc.id
+            WHERE r.patron_id = ? 
+            ORDER BY r.reserved_at DESC
+        ");
+        $stmt->execute([$patron_id]);
+        $reservations = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        
+        json_response($reservations);
+        
+    } catch (Exception $e) {
+        json_response(['error' => 'Database error: ' . $e->getMessage()], 500);
+    }
+    exit;
+}
 
 if (!isset($RESOURCES[$resource])) {
     json_response(['error' => 'Unknown resource'], 404);
@@ -130,33 +378,19 @@ $pdo = DB::conn();
 
 // -----------------------------------------------------------------------------
 // Ensure the reservations table has a `reason` column.
-//
-// Several installations may not have run the migration that adds the
-// optional decline reason column on the reservations table.  When a PUT or
-// POST request includes a `reason` property or when queries attempt to
-// select it, MySQL will emit SQLSTATE 42S22 / 1054 unknown column errors.
-// To avoid these fatal errors and to support the decline reason feature
-// seamlessly, attempt to select the `reason` column and create it on the fly
-// if it does not exist.  This check executes once per request and has
-// negligible overhead when the column exists.  It is performed before
-// entering the switch statement to cover all CRUD methods.
 if ($resource === 'reservations') {
     try {
-        // Attempt to select the column.  If the column is missing this
-        // statement will throw.
-        $pdo->query('SELECT reason FROM reservations LIMIT 1');
+        $pdo->query('SELECT reason, notes FROM reservations LIMIT 1');
     } catch (Throwable $ex) {
         $msg = $ex->getMessage();
-        // SQLSTATE 42S22 or error number 1054 correspond to unknown column
-        // errors.  Add the column dynamically.
         if (strpos($msg, '42S22') !== false || strpos($msg, '1054') !== false) {
             try {
                 $pdo->exec('ALTER TABLE reservations ADD COLUMN reason VARCHAR(255) NULL AFTER expiration_date');
+                $pdo->exec('ALTER TABLE reservations ADD COLUMN notes TEXT NULL AFTER reason');
             } catch (Throwable $e) {
                 // Silently ignore if another request has already created it.
             }
         } else {
-            // Re-throw if unrelated to missing column
             throw $ex;
         }
     }
@@ -164,24 +398,11 @@ if ($resource === 'reservations') {
 
 // -------------------------------------------------------------------------
 // Automatically provision the ebook_requests table if it does not exist.
-//
-// Some deployments may omit running the migration that creates the
-// ebook_requests table. When a student attempts to request access to
-// e‑books, the API will try to insert into this table. Without the
-// table, MySQL throws a 42S02/1146 error (base table not found). To
-// provide a seamless experience and avoid confusing server errors on
-// the frontend, detect the absence of the table and create it on the
-// fly using the same schema as defined in migrations/schema.sql. This
-// check executes only when the ebook_requests resource is being used
-// and imposes negligible overhead on other resources.
 if ($resource === 'ebook_requests') {
     try {
-        // Attempt a simple query. If the table does not exist the
-        // statement will throw.
         $pdo->query("SELECT 1 FROM ebook_requests LIMIT 1");
     } catch (Throwable $ex) {
         $msg = $ex->getMessage();
-        // SQLSTATE 42S02 or error number 1146 correspond to missing table.
         if (strpos($msg, '42S02') !== false || strpos($msg, '1146') !== false) {
             $createSql = <<<SQL
 CREATE TABLE IF NOT EXISTS ebook_requests (
@@ -199,8 +420,6 @@ CREATE TABLE IF NOT EXISTS ebook_requests (
 SQL;
             $pdo->exec($createSql);
         } else {
-            // If the error is unrelated to a missing table, rethrow so the
-            // global exception handler can return a 500 to the client.
             throw $ex;
         }
     }
@@ -220,17 +439,53 @@ switch ($method) {
                 if ($resource === 'users') $row = null;
                 if ($resource === 'patrons' && $row && (int)$row['id'] !== (int)($user['patron_id'] ?? -1)) $row = null;
             }
+            
+            // For books, ensure cache is accurate
+            if ($resource === 'books' && $row) {
+                // Recalculate available copies
+                $availStmt = $pdo->prepare("
+                    SELECT COUNT(*) as available_count
+                    FROM book_copies
+                    WHERE book_id = ? AND status = 'available' AND is_active = 1
+                ");
+                $availStmt->execute([$id]);
+                $available = $availStmt->fetch(PDO::FETCH_ASSOC);
+                
+                $totalStmt = $pdo->prepare("
+                    SELECT COUNT(*) as total_count
+                    FROM book_copies
+                    WHERE book_id = ? AND is_active = 1
+                ");
+                $totalStmt->execute([$id]);
+                $total = $totalStmt->fetch(PDO::FETCH_ASSOC);
+                
+                $row['available_copies_cache'] = $available['available_count'] ?? 0;
+                $row['total_copies_cache'] = $total['total_count'] ?? 0;
+                
+                // Update cache if different
+                if ($row['available_copies_cache'] != ($row['available_copies_cache'] ?? 0) || 
+                    $row['total_copies_cache'] != ($row['total_copies_cache'] ?? 0)) {
+                    $updateStmt = $pdo->prepare("
+                        UPDATE books 
+                        SET available_copies_cache = ?, total_copies_cache = ?
+                        WHERE id = ?
+                    ");
+                    $updateStmt->execute([
+                        $row['available_copies_cache'],
+                        $row['total_copies_cache'],
+                        $id
+                    ]);
+                }
+            }
+            
             json_response($row ?: null);
         } else {
             if (in_array($role, ['student','non_staff'], true)) {
                 // Students and non‑teaching staff can only query their own
                 // reservations, borrow logs, lost/damaged reports and e‑book
-                // access requests.  Restrict the resource accordingly.
+                // access requests.
                 if (in_array($resource, ['reservations','borrow_logs','lost_damaged_reports','ebook_requests'], true)) {
                     if ($resource === 'ebook_requests') {
-                        // Filter by username rather than patron_id for the
-                        // new schema.  Students should only see their own
-                        // e‑book access requests.
                         $uname = $user['username'] ?? '';
                         $stmt = $pdo->prepare('SELECT * FROM ' . $conf['table'] . ' WHERE username = :uname ORDER BY id DESC');
                         $stmt->execute([':uname' => $uname]);
@@ -241,9 +496,49 @@ switch ($method) {
                         $stmt->execute([':pid' => $pid]);
                         $rows = $stmt->fetchAll();
                     }
-                } elseif ($resource === 'books' || $resource === 'ebooks') {
+                } elseif ($resource === 'books' || $resource === 'ebooks' || $resource === 'categories' || $resource === 'library_map_config') {
                     $stmt = $pdo->query('SELECT * FROM ' . $conf['table'] . ' ORDER BY id DESC');
                     $rows = $stmt->fetchAll();
+                    
+                    // For books, ensure cache is accurate
+                    if ($resource === 'books') {
+                        foreach ($rows as &$book) {
+                            $availStmt = $pdo->prepare("
+                                SELECT COUNT(*) as available_count
+                                FROM book_copies
+                                WHERE book_id = ? AND status = 'available' AND is_active = 1
+                            ");
+                            $availStmt->execute([$book['id']]);
+                            $available = $availStmt->fetch(PDO::FETCH_ASSOC);
+                            
+                            $totalStmt = $pdo->prepare("
+                                SELECT COUNT(*) as total_count
+                                FROM book_copies
+                                WHERE book_id = ? AND is_active = 1
+                            ");
+                            $totalStmt->execute([$book['id']]);
+                            $total = $totalStmt->fetch(PDO::FETCH_ASSOC);
+                            
+                            $book['available_copies_cache'] = $available['available_count'] ?? 0;
+                            $book['total_copies_cache'] = $total['total_count'] ?? 0;
+                            
+                            // Update cache if different
+                            if ($book['available_copies_cache'] != ($book['available_copies_cache'] ?? 0) || 
+                                $book['total_copies_cache'] != ($book['total_copies_cache'] ?? 0)) {
+                                $updateStmt = $pdo->prepare("
+                                    UPDATE books 
+                                    SET available_copies_cache = ?, total_copies_cache = ?
+                                    WHERE id = ?
+                                ");
+                                $updateStmt->execute([
+                                    $book['available_copies_cache'],
+                                    $book['total_copies_cache'],
+                                    $book['id']
+                                ]);
+                            }
+                        }
+                        unset($book);
+                    }
                 } elseif ($resource === 'patrons') {
                     $stmt = $pdo->prepare('SELECT * FROM patrons WHERE id = :pid');
                     $stmt->execute([':pid' => (int)($user['patron_id'] ?? 0)]);
@@ -254,14 +549,50 @@ switch ($method) {
             } else {
                 $stmt = $pdo->query("SELECT * FROM {$conf['table']} ORDER BY id DESC");
                 $rows = $stmt->fetchAll();
+                
+                // For books, ensure cache is accurate
+                if ($resource === 'books') {
+                    foreach ($rows as &$book) {
+                        $availStmt = $pdo->prepare("
+                            SELECT COUNT(*) as available_count
+                            FROM book_copies
+                            WHERE book_id = ? AND status = 'available' AND is_active = 1
+                        ");
+                        $availStmt->execute([$book['id']]);
+                        $available = $availStmt->fetch(PDO::FETCH_ASSOC);
+                        
+                        $totalStmt = $pdo->prepare("
+                            SELECT COUNT(*) as total_count
+                            FROM book_copies
+                            WHERE book_id = ? AND is_active = 1
+                        ");
+                        $totalStmt->execute([$book['id']]);
+                        $total = $totalStmt->fetch(PDO::FETCH_ASSOC);
+                        
+                        $book['available_copies_cache'] = $available['available_count'] ?? 0;
+                        $book['total_copies_cache'] = $total['total_count'] ?? 0;
+                        
+                        // Update cache if different
+                        if ($book['available_copies_cache'] != ($book['available_copies_cache'] ?? 0) || 
+                            $book['total_copies_cache'] != ($book['total_copies_cache'] ?? 0)) {
+                            $updateStmt = $pdo->prepare("
+                                UPDATE books 
+                                SET available_copies_cache = ?, total_copies_cache = ?
+                                WHERE id = ?
+                            ");
+                            $updateStmt->execute([
+                                $book['available_copies_cache'],
+                                $book['total_copies_cache'],
+                                $book['id']
+                            ]);
+                        }
+                    }
+                    unset($book);
+                }
             }
-            // Augment rows with user names when a patron_id column exists.  The
-            // frontend replaces the `patron_id` column with a `user` column and
-            // displays the associated name.  We build a mapping of patron IDs
-            // to names using both the users and patrons tables.  See public/crud.php
-            // for UI handling.
+            
+            // Augment rows with user names when a patron_id column exists
             if (!empty($rows) && isset($rows[0]) && array_key_exists('patron_id', $rows[0])) {
-                // Gather distinct patron IDs.
                 $pidsMap = [];
                 foreach ($rows as $r) {
                     if (isset($r['patron_id'])) {
@@ -272,7 +603,6 @@ switch ($method) {
                 $userMap = [];
                 $usernameMap = [];
                 if ($patronIds) {
-                    // Fetch names and usernames from the users table keyed by patron_id.
                     $placeholders = implode(',', array_fill(0, count($patronIds), '?'));
                     $uq = $pdo->prepare("SELECT patron_id, COALESCE(name, '') AS name, username FROM users WHERE patron_id IN ($placeholders)");
                     $uq->execute($patronIds);
@@ -281,10 +611,7 @@ switch ($method) {
                         $userMap[$pidKey] = $m['name'];
                         $usernameMap[$pidKey] = $m['username'];
                     }
-                    // Look up any missing IDs in the patrons table for names only.  If a
-                    // patron has no associated user record (e.g. guest checkout), we
-                    // still attempt to show their name from the patrons table.  The
-                    // username will remain undefined in that case.
+                    
                     $missing = array_values(array_diff($patronIds, array_keys($userMap)));
                     if ($missing) {
                         $ph = implode(',', array_fill(0, count($missing), '?'));
@@ -315,25 +642,19 @@ switch ($method) {
         $initial_copies_data = null;
         if ($resource === 'books' && isset($data['initial_copies'])) {
             $initial_copies_data = $data['initial_copies'];
-            unset($data['initial_copies']); // Remove from main data
+            unset($data['initial_copies']);
         }
         
-        // Remove null values so that database defaults (e.g., CURRENT_TIMESTAMP) are used
+        // Remove null values so that database defaults are used
         if (is_array($data)) {
             $data = array_filter($data, function ($v) {
                 return $v !== null;
             });
-            // Normalize any datetime-local inputs.  Browsers submit
-            // datetime-local values in the form "YYYY-MM-DDTHH:MM".  MySQL
-            // accepts "YYYY-MM-DD HH:MM:SS" or similar.  Convert common
-            // patterns by replacing the "T" separator and adding seconds if
-            // missing.  Only certain fields should be converted.
+            
             foreach (['reserved_at','borrowed_at','due_date','returned_at'] as $dtField) {
                 if (isset($data[$dtField]) && is_string($data[$dtField])) {
                     $v = $data[$dtField];
-                    // Replace ISO separator T with space
                     $v = str_replace('T', ' ', $v);
-                    // Append seconds if only minutes are present
                     if (preg_match('/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/', $v)) {
                         $v .= ':00';
                     }
@@ -341,29 +662,18 @@ switch ($method) {
                 }
             }
         }
+        
         // Special handling for password (users)
         if ($resource === 'users' && !empty($data['password'])) {
             $data['password_hash'] = password_hash($data['password'], PASSWORD_DEFAULT);
             unset($data['password']);
         }
+        
         // student/non_staff: enforce ownership and populate identifying fields
         if (in_array($role, ['student','non_staff'], true)) {
-            // Students and non‑staff may create reservations, borrow logs,
-            // lost/damaged reports, or e‑book access requests.  For
-            // reservations, borrow_logs and lost_damaged_reports we bind
-            // the patron_id to the currently logged in user.  For
-            // ebook_requests we instead bind the username to the
-            // currently logged in user and leave book_id untouched.
             if (in_array($resource, ['reservations','borrow_logs','lost_damaged_reports','ebook_requests'], true)) {
                 if ($resource === 'ebook_requests') {
-                    // Remove any supplied username to prevent spoofing and
-                    // set it from the session user.  Do not allow
-                    // students/non‑staff to impersonate another user.
                     $data['username'] = $user['username'] ?? '';
-                    // Do not attach patron_id; the new schema uses
-                    // username instead.  book_id may be supplied by the
-                    // client when requesting a specific e‑book; if it is
-                    // absent the DB default of NULL applies.
                     unset($data['patron_id']);
                 } else {
                     $data['patron_id'] = (int)($user['patron_id'] ?? 0);
@@ -372,7 +682,8 @@ switch ($method) {
                 json_response(['error' => 'Forbidden'], 403);
             }
         }
-        // Defaults for borrow logs (students/non_staff or staff if omitted)
+        
+        // Defaults for borrow logs
         if ($resource === 'borrow_logs') {
             if (empty($data['borrowed_at'])) {
                 $data['borrowed_at'] = (new DateTime())->format('Y-m-d H:i:s');
@@ -381,37 +692,80 @@ switch ($method) {
                 $days = (int)settings_get('borrow_period_days', 14);
                 $data['due_date'] = (new DateTime('+' . $days . ' days'))->format('Y-m-d H:i:s');
             }
+            
             // ensure book available
             if (empty($data['book_id'])) json_response(['error'=>'book_id required'],422);
-            $avail = $pdo->prepare('SELECT available_copies FROM books WHERE id = :id');
+            $avail = $pdo->prepare('SELECT available_copies_cache FROM books WHERE id = :id');
             $avail->execute([':id'=>(int)$data['book_id']]);
             $available = (int)$avail->fetchColumn();
             if ($available < 1) json_response(['error'=>'Book not available'],422);
         }
-        // Validate reservations: ensure the referenced book exists and, optionally, has available copies.
+        
+        // Validate reservations
         if ($resource === 'reservations') {
             if (empty($data['book_id'])) {
                 json_response(['error' => 'book_id required'], 422);
             }
-            $chkBook = $pdo->prepare('SELECT available_copies FROM books WHERE id = :id');
+            
+            // Check if book exists and get its details
+            $chkBook = $pdo->prepare('SELECT id, available_copies_cache, total_copies_cache FROM books WHERE id = :id');
             $chkBook->execute([':id' => (int)$data['book_id']]);
             $bookRow = $chkBook->fetch();
             if (!$bookRow) {
                 json_response(['error' => 'Invalid book_id'], 422);
             }
-            // Only allow a reservation if at least one copy is available.  This mirrors the borrow
-            // logic and prevents overbooking books that are out of stock.  If you wish to
-            // allow reservations even when no copies are currently available, comment out
-            // the following condition.
-            if ((int)$bookRow['available_copies'] < 1) {
-                json_response(['error' => 'No available copies for reservation'], 422);
+            
+            // If a specific copy is selected, check its status
+            if (!empty($data['book_copy_id'])) {
+                $chkCopy = $pdo->prepare('SELECT id, status, book_id FROM book_copies WHERE id = :copy_id');
+                $chkCopy->execute([':copy_id' => (int)$data['book_copy_id']]);
+                $copyRow = $chkCopy->fetch();
+                
+                if (!$copyRow) {
+                    json_response(['error' => 'Invalid copy selected'], 422);
+                }
+                
+                if ($copyRow['book_id'] != $data['book_id']) {
+                    json_response(['error' => 'Selected copy does not belong to this book'], 422);
+                }
+                
+                if ($copyRow['status'] !== 'available') {
+                    json_response(['error' => 'Selected copy is not available'], 422);
+                }
+                
+                // Update the copy status to 'reserved'
+                $pdo->prepare('UPDATE book_copies SET status = "reserved" WHERE id = :cid')
+                    ->execute([':cid' => (int)$data['book_copy_id']]);
+                    
+                // Update available count - reservation makes copy unavailable
+                $pdo->prepare('UPDATE books SET available_copies_cache = GREATEST(available_copies_cache - 1, 0) WHERE id = :bid')
+                    ->execute([':bid' => (int)$data['book_id']]);
+            } else {
+                // If no specific copy, just check general availability
+                if ((int)$bookRow['available_copies_cache'] < 1) {
+                    json_response(['error' => 'No available copies for reservation'], 422);
+                }
+                // Reduce available count by 1 for general reservation
+                $pdo->prepare('UPDATE books SET available_copies_cache = GREATEST(available_copies_cache - 1, 0) WHERE id = :bid')
+                    ->execute([':bid' => (int)$data['book_id']]);
+            }
+            
+            // Set default reservation date if not provided
+            if (empty($data['reserved_at'])) {
+                $data['reserved_at'] = (new DateTime())->format('Y-m-d H:i:s');
             }
         }
+        
         $fields = array_intersect(array_keys($data), $conf['fields']);
         $insert = array_merge($conf['defaults'] ?? [], array_intersect_key($data, array_flip($fields)));
+        
+        // Ensure notes field is included if present in data
+        if (isset($data['notes']) && !in_array('notes', $fields)) {
+            $insert['notes'] = $data['notes'];
+        }
+        
         if (empty($insert)) json_response(['error' => 'No valid fields'], 422);
         $cols = array_keys($insert);
-        // Use a standard closure instead of arrow function for compatibility
         $params = array_map(function ($c) {
             return ':' . $c;
         }, $cols);
@@ -491,7 +845,6 @@ switch ($method) {
                 if ($pdo->inTransaction()) {
                     $pdo->rollBack();
                 }
-                // Continue anyway - the book was created, just log the error
                 error_log("Failed to create initial copies: " . $e->getMessage());
             }
         }
@@ -499,10 +852,20 @@ switch ($method) {
         $stmt = $pdo->prepare('SELECT * FROM ' . $conf['table'] . ' WHERE id = :id');
         $stmt->execute([':id' => $newId]);
         $row = $stmt->fetch();
+        
         // Post-insert hooks
         if ($resource === 'borrow_logs') {
             if (($row['status'] ?? 'borrowed') === 'borrowed') {
-                $pdo->prepare('UPDATE books SET available_copies = GREATEST(available_copies - 1, 0) WHERE id = :bid')->execute([':bid'=>$row['book_id']]);
+                // Update available copies count
+                $pdo->prepare('UPDATE books SET available_copies_cache = GREATEST(available_copies_cache - 1, 0) WHERE id = :bid')
+                    ->execute([':bid'=>$row['book_id']]);
+                    
+                // Update the book copy status to borrowed
+                if (isset($data['book_copy_id'])) {
+                    $pdo->prepare('UPDATE book_copies SET status = "borrowed" WHERE id = :cid')
+                        ->execute([':cid' => $data['book_copy_id']]);
+                }
+                
                 notify_user(null, 'librarian', 'borrowed', 'A book was borrowed', ['borrow_log_id'=>$row['id']]);
             }
             audit('create','borrow_logs', (int)$row['id'], $row);
@@ -512,8 +875,20 @@ switch ($method) {
             notify_user(null, 'librarian', 'report', 'A lost/damaged report was filed', ['report_id'=>$row['id']]);
             audit('create','lost_damaged_reports', (int)$row['id'], $row);
         } elseif ($resource === 'reservations') {
-            // When a student creates a reservation, notify staff for approval. Use a role target of
-            // admin so that all staff (admin, librarian, assistant) receive it via the notifications API.
+            // Log the copy transaction if a specific copy was reserved
+            if (!empty($data['book_copy_id'])) {
+                $transStmt = $pdo->prepare("
+                    INSERT INTO copy_transactions 
+                    (book_copy_id, transaction_type, from_status, to_status, notes)
+                    VALUES (?, 'reserved', 'available', 'reserved', ?)
+                ");
+                $transStmt->execute([
+                    (int)$data['book_copy_id'],
+                    'Reserved by patron #' . $row['patron_id'] . ' (Reservation ID: ' . $row['id'] . ')'
+                ]);
+            }
+            
+            // When a student creates a reservation, notify staff for approval
             notify_user(null, 'admin', 'reservation', 'New reservation pending approval', [
                 'reservation_id' => $row['id'],
                 'patron_id' => $row['patron_id'],
@@ -530,26 +905,25 @@ switch ($method) {
         require_csrf();
         if (!$id) json_response(['error' => 'ID required'], 400);
         $data = read_json_body();
+        
         // Remove null values to avoid overwriting with NULL and use DB defaults
         if (is_array($data)) {
             $data = array_filter($data, function ($v) {
                 return $v !== null;
             });
         }
+        
         if ($resource === 'users' && !empty($data['password'])) {
             $data['password_hash'] = password_hash($data['password'], PASSWORD_DEFAULT);
             unset($data['password']);
         }
+        
         // Ownership enforcement for students
         if (in_array($role, ['student','non_staff'], true)) {
-            // Students and non‑staff can only update their own reservations,
-            // borrow logs, lost/damaged reports or e‑book requests.  Any
-            // attempt to update other resources should be rejected.
             if (!in_array($resource, ['reservations','borrow_logs','lost_damaged_reports','ebook_requests'], true)) {
                 json_response(['error' => 'Forbidden'], 403);
             }
             if ($resource === 'ebook_requests') {
-                // For e‑book requests ownership is determined by username
                 $chk = $pdo->prepare('SELECT username FROM ' . $conf['table'] . ' WHERE id = :id');
                 $chk->execute([':id' => $id]);
                 $ownUser = (string)$chk->fetchColumn();
@@ -562,9 +936,8 @@ switch ($method) {
                 if ($own !== (int)($user['patron_id'] ?? 0)) json_response(['error' => 'Forbidden'], 403);
             }
         }
-        // Normalize datetime-local inputs on updates just like POST.  See
-        // commentary above.  Perform this before intersecting with allowed fields
-        // so that converted values are passed through.
+        
+        // Normalize datetime-local inputs on updates
         if (is_array($data)) {
             foreach (['reserved_at','borrowed_at','due_date','returned_at'] as $dtField) {
                 if (isset($data[$dtField]) && is_string($data[$dtField])) {
@@ -579,7 +952,8 @@ switch ($method) {
         }
 
         $fields = array_intersect(array_keys($data), $conf['fields']);
-        // Capture the current state for reservations and ebook requests before applying updates
+        
+        // Capture the current state before applying updates
         $prevReservation = null;
         $prevEbookReq = null;
         if ($resource === 'reservations') {
@@ -591,6 +965,7 @@ switch ($method) {
             $stmtPrev->execute([':id' => $id]);
             $prevEbookReq = $stmtPrev->fetch();
         }
+        
         if (empty($fields)) json_response(['error' => 'No valid fields'], 422);
         $set = [];
         $params = [':id' => $id];
@@ -604,27 +979,39 @@ switch ($method) {
         $stmt = $pdo->prepare('SELECT * FROM ' . $conf['table'] . ' WHERE id = :id');
         $stmt->execute([':id' => $id]);
         $row = $stmt->fetch();
-        // For ebook requests, if the status changed from pending to another state, notify the requesting user.
-        if ($resource === 'ebook_requests') {
-            if ($prevEbookReq && isset($data['status']) && ($prevEbookReq['status'] ?? '') !== ($row['status'] ?? '')) {
-                // Look up the user ID by username to deliver the notification
-                $uname = $row['username'] ?? '';
-                $uidStmt = $pdo->prepare('SELECT id FROM users WHERE username = :uname LIMIT 1');
-                $uidStmt->execute([':uname' => $uname]);
-                $uidTarget = (int)$uidStmt->fetchColumn();
-                if ($uidTarget) {
-                    if ($row['status'] === 'approved') {
-                        notify_user($uidTarget, null, 'ebook_request_approved', 'Your e‑book access request has been approved', [ 'ebook_request_id' => $row['id'], 'book_id' => $row['book_id'] ]);
-                    } elseif ($row['status'] === 'declined') {
-                        notify_user($uidTarget, null, 'ebook_request_declined', 'Your e‑book access request has been declined', [ 'ebook_request_id' => $row['id'], 'book_id' => $row['book_id'] ]);
+        
+        // For reservations, handle status changes (especially cancellations)
+        if ($resource === 'reservations') {
+            if ($prevReservation && isset($data['status']) && ($prevReservation['status'] ?? '') !== ($row['status'] ?? '')) {
+                // If reservation is cancelled or declined, return the copy to available status
+                if (in_array($row['status'], ['cancelled', 'declined', 'expired']) && in_array($prevReservation['status'], ['pending', 'approved'])) {
+                    if (!empty($prevReservation['book_copy_id'])) {
+                        // Update book copy status back to available
+                        $pdo->prepare('UPDATE book_copies SET status = "available" WHERE id = :cid')
+                            ->execute([':cid' => (int)$prevReservation['book_copy_id']]);
+                            
+                        // Increase available count
+                        $pdo->prepare('UPDATE books SET available_copies_cache = available_copies_cache + 1 WHERE id = :bid')
+                            ->execute([':bid' => (int)$prevReservation['book_id']]);
+                            
+                        // Log the transaction
+                        $transStmt = $pdo->prepare("
+                            INSERT INTO copy_transactions 
+                            (book_copy_id, transaction_type, from_status, to_status, notes)
+                            VALUES (?, 'cancelled', 'reserved', 'available', ?)
+                        ");
+                        $transStmt->execute([
+                            (int)$prevReservation['book_copy_id'],
+                            'Reservation cancelled (ID: ' . $row['id'] . ')'
+                        ]);
+                    } else {
+                        // For general reservation (no specific copy), still increase available count
+                        $pdo->prepare('UPDATE books SET available_copies_cache = available_copies_cache + 1 WHERE id = :bid')
+                            ->execute([':bid' => (int)$prevReservation['book_id']]);
                     }
                 }
-            }
-        }
-        if ($resource === 'reservations') {
-            // If the reservation status changed from pending to another state, notify the patron accordingly.
-            if ($prevReservation && isset($data['status']) && ($prevReservation['status'] ?? '') !== ($row['status'] ?? '')) {
-                // Determine the patron's user ID for notification. Each patron maps to exactly one user.
+                
+                // Notify user about status change
                 $uidStmt = $pdo->prepare('SELECT id FROM users WHERE patron_id = :pid LIMIT 1');
                 $uidStmt->execute([':pid' => $row['patron_id']]);
                 $uid = (int)$uidStmt->fetchColumn();
@@ -635,10 +1022,6 @@ switch ($method) {
                             'book_id' => $row['book_id']
                         ]);
                     } elseif ($row['status'] === 'declined' || $row['status'] === 'cancelled') {
-                        // Include the decline reason when notifying the patron.  When staff
-                        // supply a reason via the API the `reason` column will be set on
-                        // the reservation.  Compose a helpful message for the user and
-                        // include the reason in the meta payload for client display.
                         $reasonMsg = '';
                         $declineReason = isset($row['reason']) ? trim((string)$row['reason']) : '';
                         if ($declineReason !== '') {
@@ -653,20 +1036,13 @@ switch ($method) {
                 }
             }
 
-            // Automatically convert an approved reservation into a borrow entry.
-            // When staff approve a reservation, create a corresponding borrow log so that the student
-            // can see it under My Borrows along with pickup and return dates. Only run this
-            // conversion when transitioning from a non-approved state to approved.
+            // Automatically convert an approved reservation into a borrow entry
             if ($prevReservation && isset($data['status']) && ($row['status'] ?? '') === 'approved' && ($prevReservation['status'] ?? '') !== 'approved') {
-                // Determine the borrowing start date. Use the reservation's reserved_at if present,
-                // otherwise default to the current timestamp.  Normalize to Y-m-d H:i:s.
                 $borrowedAt = $row['reserved_at'] ?? null;
                 if (!$borrowedAt) {
                     $borrowedAt = (new DateTime())->format('Y-m-d H:i:s');
                 }
-                // Compute the due date. Prefer the expiration_date provided on the reservation. If it
-                // contains only a date (YYYY-MM-DD), append a time so MySQL will accept it. If no
-                // expiration_date is supplied, fall back to using the configured borrow period.
+                
                 $dueDate = null;
                 if (!empty($row['expiration_date'])) {
                     $exp = $row['expiration_date'];
@@ -686,11 +1062,11 @@ switch ($method) {
                     $dBorrow->modify('+' . $days . ' days');
                     $dueDate = $dBorrow->format('Y-m-d H:i:s');
                 }
-                // Avoid inserting duplicate borrow logs for the same reservation.  Check if a borrow
-                // already exists for this book and patron combination on the same borrowed_at date.
+                
                 $dupStmt = $pdo->prepare('SELECT id FROM borrow_logs WHERE book_id = :bid AND patron_id = :pid AND borrowed_at = :bat LIMIT 1');
                 $dupStmt->execute([':bid' => (int)$row['book_id'], ':pid' => (int)$row['patron_id'], ':bat' => $borrowedAt]);
                 $existingBorrowId = $dupStmt->fetchColumn();
+                
                 if (!$existingBorrowId) {
                     // Insert the borrow log entry
                     $stmtInsert = $pdo->prepare('INSERT INTO borrow_logs (book_id, patron_id, borrowed_at, due_date, status, notes) VALUES (:bid, :pid, :bat, :dd, :status, :notes)');
@@ -700,18 +1076,22 @@ switch ($method) {
                         ':bat' => $borrowedAt,
                         ':dd' => $dueDate,
                         ':status' => 'borrowed',
-                        ':notes' => 'Reservation ID ' . $row['id'],
+                        ':notes' => 'Reservation ID ' . $row['id'] . ($row['notes'] ? ' - ' . $row['notes'] : ''),
                     ]);
                     $newBorrowId = (int)$pdo->lastInsertId();
-                    // Deduct an available copy of the book when the borrow is created.  Mirrors the
-                    // behavior of the normal borrow_logs creation path.
-                    $pdo->prepare('UPDATE books SET available_copies = GREATEST(available_copies - 1, 0) WHERE id = :bid')->execute([':bid' => (int)$row['book_id']]);
+                    
+                    // Update book copy status from 'reserved' to 'borrowed' if it was reserved
+                    if (!empty($prevReservation['book_copy_id'])) {
+                        $pdo->prepare('UPDATE book_copies SET status = "borrowed" WHERE id = :cid')
+                            ->execute([':cid' => (int)$prevReservation['book_copy_id']]);
+                    }
+                    
                     // Retrieve the inserted borrow row for auditing and notifications
                     $stmtBorrow = $pdo->prepare('SELECT * FROM borrow_logs WHERE id = :id');
                     $stmtBorrow->execute([':id' => $newBorrowId]);
                     $borrowRow = $stmtBorrow->fetch();
                     audit('create', 'borrow_logs', $newBorrowId, $borrowRow);
-                    // Notify the patron that their reservation has been converted to a borrow
+                    
                     $uidStmt2 = $pdo->prepare('SELECT id FROM users WHERE patron_id = :pid LIMIT 1');
                     $uidStmt2->execute([':pid' => $row['patron_id']]);
                     $uidBorrow = (int)$uidStmt2->fetchColumn();
@@ -729,7 +1109,16 @@ switch ($method) {
             audit('update','reservations', (int)$row['id'], $row);
         } elseif ($resource === 'borrow_logs') {
             if (($row['status'] ?? '') === 'returned') {
-                $pdo->prepare('UPDATE books SET available_copies = available_copies + 1 WHERE id = :bid')->execute([':bid'=>$row['book_id']]);
+                // Update available copies count
+                $pdo->prepare('UPDATE books SET available_copies_cache = available_copies_cache + 1 WHERE id = :bid')
+                    ->execute([':bid'=>$row['book_id']]);
+                    
+                // Update book copy status back to available
+                if (!empty($data['book_copy_id'])) {
+                    $pdo->prepare('UPDATE book_copies SET status = "available" WHERE id = :cid')
+                        ->execute([':cid' => (int)$data['book_copy_id']]);
+                }
+                    
                 $late = compute_late_fee($row['due_date'] ?? null, $row['returned_at'] ?? null);
                 $pdo->prepare('UPDATE borrow_logs SET late_fee = :f WHERE id = :id')->execute([':f'=>$late, ':id'=>$row['id']]);
                 notify_user(null, 'librarian', 'returned', 'A book was returned', ['borrow_log_id'=>$row['id'],'late_fee'=>$late]);
@@ -755,6 +1144,26 @@ switch ($method) {
             $own = (int)$chk->fetchColumn();
             if ($own !== (int)($user['patron_id'] ?? 0)) json_response(['error' => 'Forbidden'], 403);
         }
+        
+        // For reservations, return the book copy to available status before deletion
+        if ($resource === 'reservations') {
+            $reservation = $pdo->prepare('SELECT book_id, book_copy_id, status FROM reservations WHERE id = :id');
+            $reservation->execute([':id' => $id]);
+            $resData = $reservation->fetch();
+            
+            if ($resData) {
+                // Update book copy status back to available if specific copy was reserved
+                if (!empty($resData['book_copy_id'])) {
+                    $pdo->prepare('UPDATE book_copies SET status = "available" WHERE id = :cid')
+                        ->execute([':cid' => (int)$resData['book_copy_id']]);
+                }
+                
+                // Increase available count
+                $pdo->prepare('UPDATE books SET available_copies_cache = available_copies_cache + 1 WHERE id = :bid')
+                    ->execute([':bid' => (int)$resData['book_id']]);
+            }
+        }
+        
         audit('delete', $resource, (int)$id);
         $stmt = $pdo->prepare('DELETE FROM ' . $conf['table'] . ' WHERE id = :id');
         $stmt->execute([':id' => $id]);
@@ -788,4 +1197,3 @@ function compute_damage_fee(string $severity): float {
         default: return $minor;
     }
 }
-?>

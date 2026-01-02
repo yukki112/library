@@ -1,0 +1,11 @@
+{
+    "require": {
+        "elasticsearch/elasticsearch": "^9.2",
+        "rubix/ml": "^2.5"
+    },
+    "config": {
+        "allow-plugins": {
+            "php-http/discovery": true
+        }
+    }
+}
