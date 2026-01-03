@@ -39,8 +39,9 @@ $user = current_user();
                     ['Books','books.php','fa-book',['student','non_staff']],
                     ['Request Book','request_book.php','fa-book-medical',['student','non_staff']],
                     ['My Borrowed Books','my_borrowed_books.php','fa-user-clock',['student','non_staff']],
+                     ['View Requested Books','view_requested_books.php','fa-eye',['admin','librarian','assistant']],
                     ['Borrowed Books','issued_books.php','fa-file-lines',['admin','librarian','assistant']],
-                    ['View Requested Books','view_requested_books.php','fa-eye',['admin','librarian','assistant']],
+                   
                     ['E‑Books','ebooks.php','fa-book-open-reader',['admin','librarian','assistant','student','non_staff']],
                     ['E‑Book Requests','ebook_requests.php','fa-book-open',['admin','librarian','assistant']],
                     ['Top Users','top_users.php','fa-users',['admin','librarian','assistant']],

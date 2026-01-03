@@ -1,6 +1,8 @@
 <?php
 require_once __DIR__ . '/../includes/config.php';
 require_once __DIR__ . '/../includes/auth.php';
+require_once __DIR__ . '/../includes/db.php';
+
 start_app_session();
 if (is_logged_in()) {
     header('Location: ' . APP_BASE_URL . '/dashboard.php');
@@ -39,10 +41,42 @@ if (is_logged_in()) {
         .form-group input:focus::placeholder {
             color: #6b7280;
         }
+        
+        .password-hint {
+            font-size: 12px;
+            color: #6b7280;
+            margin-top: 4px;
+            display: block;
+        }
+        
+        .student-only {
+            background-color: #f0f9ff;
+            border-left: 4px solid #3b82f6;
+            padding: 12px;
+            margin: 16px 0;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 2px solid #fff;
+            border-radius: 50%;
+            border-top-color: transparent;
+            animation: spin 1s linear infinite;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
     </style>
 </head>
 <body class="login-container">
-    <form class="login-card login-form" onsubmit="login(event)">
+    <form class="login-card login-form" onsubmit="return false;">
         <div class="login-header">
             <div class="login-icon">
                 <img src="<?= htmlspecialchars(APP_LOGO_URL) ?>" alt="logo" onerror="this.style.display='none'" />
@@ -63,8 +97,9 @@ if (is_logged_in()) {
         <div id="error" class="login-error"></div>
 
         <div class="form-group">
-            <label for="username">Username</label>
+            <label for="username" id="username-label">Username</label>
             <input id="username" autocomplete="username" required placeholder="Enter your username" />
+            <span id="username-hint" class="password-hint" style="display: none;">Use your Student ID for student login</span>
         </div>
         <div class="form-group">
             <label for="password">Password</label>
@@ -74,29 +109,29 @@ if (is_logged_in()) {
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12Z"/><circle cx="12" cy="12" r="3"/></svg>
                 </button>
             </div>
+            <span id="password-hint" class="password-hint" style="display: none;">Default password: 0000 (Change after first login)</span>
         </div>
+
+        
 
         <div class="checkbox-item" id="rememberRow" style="display:none;">
             <input id="remember" type="checkbox" />
             <label for="remember">Remember me for 30 days</label>
         </div>
-        <div id="registerRow" class="text-center" style="display:none;">
-            <span style="font-size:14px; color:#6b7280;">Don't have an account?</span>
-            <a href="register.php" style="font-size:14px; font-weight:600;"> Register here</a>
-        </div>
 
-        <button class="btn btn-primary btn-full" type="submit">
-            Sign In
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="margin-left: 8px;">
-                <path d="M5 12H19M19 12L12 5M19 12L12 19" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
+        <button class="btn btn-primary btn-full" type="button" onclick="handleLogin()" id="loginBtn">
+            <span id="btnText">Sign In</span>
+            <span id="btnLoader" style="display:none;" class="loading"></span>
         </button>
 
         <div id="twofa" class="form-group" style="display:none; margin-top:8px;">
             <label for="code">Enter 2FA code sent to your email</label>
             <input id="code" placeholder="123456" maxlength="6" pattern="[0-9]*" inputmode="numeric" />
             <div class="mt-4">
-                <button class="btn btn-primary btn-full" onclick="verify2fa(event)">Verify & Continue</button>
+                <button class="btn btn-primary btn-full" type="button" onclick="verify2fa()" id="verifyBtn">
+                    <span id="verifyText">Verify & Continue</span>
+                    <span id="verifyLoader" style="display:none;" class="loading"></span>
+                </button>
             </div>
         </div>
 
@@ -107,57 +142,246 @@ if (is_logged_in()) {
 
     <script>
         let currentTab = (new URLSearchParams(location.search).get('tab')) || 'staff';
+        let pendingUserId = null;
+        
         function setTab(tab){
             currentTab = tab;
             document.getElementById('tab-staff').classList.toggle('active', tab==='staff');
             document.getElementById('tab-student').classList.toggle('active', tab==='student');
             document.getElementById('rememberRow').style.display = (tab==='student') ? 'flex' : 'none';
-            document.getElementById('registerRow').style.display = (tab==='student') ? 'block' : 'none';
+            document.getElementById('student-info').style.display = (tab==='student') ? 'block' : 'none';
+            document.getElementById('username-hint').style.display = (tab==='student') ? 'block' : 'none';
+            document.getElementById('password-hint').style.display = (tab==='student') ? 'block' : 'none';
+            
+            // Update label
+            const label = document.getElementById('username-label');
+            label.textContent = (tab==='student') ? 'Student ID' : 'Username';
+            
+            // Update placeholder
+            const input = document.getElementById('username');
+            input.placeholder = (tab==='student') ? 'Enter your Student ID' : 'Enter your username';
         }
-        async function login(ev){
-            ev.preventDefault();
+        
+        async function handleLogin() {
             const username = document.getElementById('username').value.trim();
             const password = document.getElementById('password').value;
             const remember = (currentTab==='student') && document.getElementById('remember').checked;
             const err = document.getElementById('error');
-            const step2 = document.getElementById('twofa');
+            const loginBtn = document.getElementById('loginBtn');
+            const btnText = document.getElementById('btnText');
+            const btnLoader = document.getElementById('btnLoader');
+            const twofaSection = document.getElementById('twofa');
+            
             err.style.display = 'none';
-            step2.style.display = 'none';
+            twofaSection.style.display = 'none';
+            
+            if (!username || !password) {
+                showError('Please enter both username and password');
+                return;
+            }
+            
+            // Show loading
+            btnText.style.display = 'none';
+            btnLoader.style.display = 'inline-block';
+            loginBtn.disabled = true;
+            
             try {
-                const res = await fetch('../api/auth.php?action=login', {
+                if (currentTab === 'student') {
+                    // For students, first try to sync/check from HR API
+                    await handleStudentLogin(username, password, remember);
+                } else {
+                    // For staff, direct login
+                    await handleStaffLogin(username, password, remember);
+                }
+            } catch (error) {
+                showError(error.message);
+            } finally {
+                // Reset button
+                btnText.style.display = 'inline';
+                btnLoader.style.display = 'none';
+                loginBtn.disabled = false;
+            }
+        }
+        
+        async function handleStudentLogin(username, password, remember) {
+            try {
+                // First, try direct login
+                const loginResponse = await fetch('../api/auth.php?action=login', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ username, password, remember })
                 });
-                const data = await res.json();
-                if (data && data.status === '2fa_required') {
-                    step2.dataset.userId = data.user_id;
-                    step2.style.display = 'block';
+                
+                const loginData = await loginResponse.json();
+                
+                if (loginData.status === '2fa_required') {
+                    pendingUserId = loginData.user_id;
+                    show2FASection();
                     return;
                 }
-                if (!res.ok) throw new Error(data.error || 'Login failed');
-                if (data.csrf) sessionStorage.setItem('csrf', data.csrf);
-                window.location.href = 'dashboard.php';
-            } catch(e) {
-                err.textContent = e.message;
-                err.style.display = 'block';
+                
+                if (loginResponse.ok) {
+                    handleSuccessfulLogin(loginData);
+                    return;
+                }
+                
+                // If login failed, try to sync student account
+                await syncAndLoginStudent(username, password, remember);
+                
+            } catch (error) {
+                throw new Error('Login failed: ' + error.message);
             }
         }
-        async function verify2fa(ev){
-            ev.preventDefault();
+        
+        async function syncAndLoginStudent(username, password, remember) {
+            // Get student data from HR API
+            let studentData = null;
+            
+            try {
+                const apiResponse = await fetch('https://ttm.qcprotektado.com/api/students.php');
+                if (apiResponse.ok) {
+                    const apiData = await apiResponse.json();
+                    if (apiData.records) {
+                        studentData = apiData.records.find(s => s.student_id == username);
+                    }
+                }
+            } catch (apiError) {
+                console.log('API not available, trying local sync');
+            }
+            
+            if (!studentData) {
+                throw new Error('Student ID not found. Please check your ID or contact administration.');
+            }
+            
+            // Sync student account
+            const syncResponse = await fetch('../api/auth.php?action=sync_student', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    student_id: username,
+                    student_data: studentData
+                })
+            });
+            
+            const syncData = await syncResponse.json();
+            
+            if (!syncResponse.ok) {
+                throw new Error(syncData.error || 'Failed to sync student account');
+            }
+            
+            // Now try login again
+            const retryResponse = await fetch('../api/auth.php?action=login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password, remember })
+            });
+            
+            const retryData = await retryResponse.json();
+            
+            if (retryData.status === '2fa_required') {
+                pendingUserId = retryData.user_id;
+                show2FASection();
+                return;
+            }
+            
+            if (!retryResponse.ok) {
+                throw new Error(retryData.error || 'Login failed after sync');
+            }
+            
+            handleSuccessfulLogin(retryData);
+        }
+        
+        async function handleStaffLogin(username, password, remember) {
+            const response = await fetch('../api/auth.php?action=login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password, remember })
+            });
+            
+            const data = await response.json();
+            
+            if (data.status === '2fa_required') {
+                pendingUserId = data.user_id;
+                show2FASection();
+                return;
+            }
+            
+            if (!response.ok) {
+                throw new Error(data.error || 'Login failed');
+            }
+            
+            handleSuccessfulLogin(data);
+        }
+        
+        async function verify2fa() {
             const code = document.getElementById('code').value.trim();
             const remember = (currentTab==='student') && document.getElementById('remember').checked;
-            const step2 = document.getElementById('twofa');
-            const user_id = step2.dataset.userId;
+            const verifyBtn = document.getElementById('verifyBtn');
+            const verifyText = document.getElementById('verifyText');
+            const verifyLoader = document.getElementById('verifyLoader');
             const err = document.getElementById('error');
+            
+            err.style.display = 'none';
+            
+            if (!code || code.length !== 6) {
+                showError('Please enter a valid 6-digit code');
+                return;
+            }
+            
+            // Show loading
+            verifyText.style.display = 'none';
+            verifyLoader.style.display = 'inline-block';
+            verifyBtn.disabled = true;
+            
             try {
-                const res = await fetch('../api/auth.php?action=verify2fa', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code, user_id, remember }) });
-                const data = await res.json();
-                if (!res.ok) throw new Error(data.error || '2FA failed');
-                if (data.csrf) sessionStorage.setItem('csrf', data.csrf);
-                window.location.href = 'dashboard.php';
-            } catch(e){ err.textContent = e.message; err.style.display='block'; }
+                const response = await fetch('../api/auth.php?action=verify2fa', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        code, 
+                        user_id: pendingUserId, 
+                        remember 
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(data.error || '2FA verification failed');
+                }
+                
+                handleSuccessfulLogin(data);
+                
+            } catch (error) {
+                showError(error.message);
+            } finally {
+                // Reset button
+                verifyText.style.display = 'inline';
+                verifyLoader.style.display = 'none';
+                verifyBtn.disabled = false;
+            }
         }
+        
+        function handleSuccessfulLogin(data) {
+            if (data.csrf) {
+                sessionStorage.setItem('csrf', data.csrf);
+            }
+            window.location.href = 'dashboard.php';
+        }
+        
+        function show2FASection() {
+            document.getElementById('twofa').style.display = 'block';
+            document.getElementById('loginBtn').style.display = 'none';
+            document.getElementById('code').focus();
+        }
+        
+        function showError(message) {
+            const err = document.getElementById('error');
+            err.textContent = message;
+            err.style.display = 'block';
+            err.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+        
         function togglePassword(id, btn){
             const el = document.getElementById(id);
             const show = el.type === 'password';
@@ -169,8 +393,32 @@ if (is_logged_in()) {
                 btn.style.transform = 'translateY(-50%)';
             }, 200);
         }
+        
         window.addEventListener('DOMContentLoaded',()=> {
             setTab(currentTab);
+            
+            // Add enter key support
+            document.getElementById('username').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    document.getElementById('password').focus();
+                }
+            });
+            
+            document.getElementById('password').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleLogin();
+                }
+            });
+            
+            document.getElementById('code')?.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    verify2fa();
+                }
+            });
+            
             // Add focus animation to inputs
             const inputs = document.querySelectorAll('input');
             inputs.forEach(input => {
