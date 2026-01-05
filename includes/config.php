@@ -4,7 +4,7 @@
 
 define('DB_HOST', getenv('LMS_DB_HOST') ?: 'localhost:3307');
 define('DB_PORT', getenv('LMS_DB_PORT') ?: '3306');
-define('DB_NAME', getenv('LMS_DB_NAME') ?: 'lms_php');
+define('DB_NAME', getenv('LMS_DB_NAME') ?: 'library');
 define('DB_USER', getenv('LMS_DB_USER') ?: 'root');
 define('DB_PASS', getenv('LMS_DB_PASS') ?: '');
 define('DB_CHARSET', 'utf8mb4');
