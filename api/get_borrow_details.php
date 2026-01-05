@@ -15,16 +15,20 @@ $sql = "SELECT
             bc.copy_number,
             bc.barcode,
             bc.book_condition,
+            bc.status as copy_status,
             p.name AS patron_name,
             p.library_id,
             p.department,
             p.semester,
-            c.name AS category_name
+            c.name AS category_name,
+            rc.receipt_number,
+            rc.pdf_path
         FROM borrow_logs bl
         JOIN books b ON bl.book_id = b.id
         LEFT JOIN book_copies bc ON bl.book_copy_id = bc.id
         JOIN patrons p ON bl.patron_id = p.id
         LEFT JOIN categories c ON b.category_id = c.id
+        LEFT JOIN receipts rc ON rc.borrow_log_id = bl.id AND rc.status = 'paid'
         WHERE bl.id = ?";
 
 $stmt = $pdo->prepare($sql);
@@ -38,8 +42,16 @@ if (!$data) {
 
 // Format the data
 $data['cover_image'] = !empty($data['cover_image_cache']) ? 
-    '../uploads/book_covers/' . $data['cover_image_cache'] : 
-    '../assets/default-book.png';
+    '../uploads/covers/' . $data['cover_image_cache'] : 
+    '../assets/images/default-book.jpg';
+
+// Parse damage types
+if (!empty($data['damage_types'])) {
+    $data['damage_types_array'] = json_decode($data['damage_types'], true);
+    if (!is_array($data['damage_types_array'])) {
+        $data['damage_types_array'] = [];
+    }
+}
 
 echo json_encode(['success' => true, 'data' => $data]);
 ?>
