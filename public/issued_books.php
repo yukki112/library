@@ -859,7 +859,7 @@ include __DIR__ . '/_header.php';
                                         $isOverdue = $row['status'] === 'overdue';
                                         $daysOverdue = $isOverdue ? max(0, floor((time() - strtotime($row['due_date'])) / (60 * 60 * 24))) : 0;
                                         $coverImage = !empty($row['cover_image_cache']) ? 
-                                            '../uploads/book_covers/' . $row['cover_image_cache'] : 
+                                            '../uploads/covers/' . $row['cover_image_cache'] : 
                                             '../assets/images/default-book.jpg';
                                         
                                         // Parse damage types if available
@@ -1062,7 +1062,7 @@ include __DIR__ . '/_header.php';
                                 <tbody>
                                     <?php foreach ($returnedBooks as $row): 
                                         $coverImage = !empty($row['cover_image_cache']) ? 
-                                            '../uploads/book_covers/' . $row['cover_image_cache'] : 
+                                            '../uploads/covers/' . $row['cover_image_cache'] : 
                                             '../assets/images/default-book.jpg';
                                         $totalFees = ($row['late_fee'] ?? 0) + ($row['penalty_fee'] ?? 0);
                                     ?>
@@ -1195,7 +1195,7 @@ include __DIR__ . '/_header.php';
                                 $daysOverdue = max(0, floor((time() - strtotime($row['due_date'])) / (60 * 60 * 24)));
                                 $overdueFee = $daysOverdue * 30;
                                 $coverImage = !empty($row['cover_image_cache']) ? 
-                                    '../uploads/book_covers/' . $row['cover_image_cache'] : 
+                                    '../uploads/covers/' . $row['cover_image_cache'] : 
                                     '../assets/images/default-book.jpg';
                             ?>
                             <div class="col-md-6 col-lg-4 mb-4">
