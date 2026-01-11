@@ -41,11 +41,12 @@ $user = current_user();
                     ['My Borrowed Books','my_borrowed_books.php','fa-user-clock',['student','non_staff']],
                      ['View Requested Books','view_requested_books.php','fa-eye',['admin','librarian','assistant']],
                     ['Borrowed Books','issued_books.php','fa-file-lines',['admin','librarian','assistant']],
-                   
+                   ['Student Information','student_information.php','fa-user-graduate',['admin','librarian','assistant']],
                     ['E‑Books','ebooks.php','fa-book-open-reader',['admin','librarian','assistant','student','non_staff']],
                     ['E‑Book Requests','ebook_requests.php','fa-book-open',['admin','librarian','assistant']],
+                     
                     ['Top Users','top_users.php','fa-users',['admin','librarian','assistant']],
-                    ['Student Information','student_information.php','fa-user-graduate',['admin','librarian','assistant']],
+                
                     ['Manage User','manage_user.php','fa-users',['admin','librarian','assistant']],
                     ['ChatBot','send_message_admin.php','fa-comment',['student','non_staff']],
                     ['Analytics','reports_analytics.php','fa-chart-line',['admin','librarian']],

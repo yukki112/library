@@ -2,11 +2,11 @@
 // Basic configuration for XAMPP MySQL
 // Update these values in your environment if needed.
 
-define('DB_HOST', getenv('LMS_DB_HOST') ?: 'localhost:3307');
+define('DB_HOST', getenv('LMS_DB_HOST') ?: 'localhost');
 define('DB_PORT', getenv('LMS_DB_PORT') ?: '3306');
-define('DB_NAME', getenv('LMS_DB_NAME') ?: 'library');
-define('DB_USER', getenv('LMS_DB_USER') ?: 'root');
-define('DB_PASS', getenv('LMS_DB_PASS') ?: '');
+define('DB_NAME', getenv('LMS_DB_NAME') ?: 'libr_library');
+define('DB_USER', getenv('LMS_DB_USER') ?: 'libr_library');
+define('DB_PASS', getenv('LMS_DB_PASS') ?: 'Admin123');
 define('DB_CHARSET', 'utf8mb4');
 
 // App settings

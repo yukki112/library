@@ -16,14 +16,32 @@ try {
     $damageFee = floatval($_POST['damage_fee'] ?? 0);
     $totalFee = floatval($_POST['total_fee'] ?? 0);
     
-    // Get borrow details with copy information
-    $sql = "SELECT bl.*, b.title, b.author, bc.id as copy_id, bc.status as copy_status,
-                   p.name AS patron_name, p.library_id 
+    // Get borrow details WITH reservation and copy information
+    $sql = "SELECT 
+                bl.*, 
+                b.title, 
+                b.author, 
+                bc.id as copy_id, 
+                bc.status as copy_status, 
+                bc.book_condition as current_condition,
+                bc.copy_number,
+                r.book_copy_id as reservation_copy_id,
+                p.name AS patron_name, 
+                p.library_id 
             FROM borrow_logs bl
             JOIN books b ON bl.book_id = b.id
-            LEFT JOIN book_copies bc ON bl.book_copy_id = bc.id
             JOIN patrons p ON bl.patron_id = p.id
+            LEFT JOIN book_copies bc ON bl.book_copy_id = bc.id
+            LEFT JOIN reservations r ON r.id = (
+                SELECT id FROM reservations 
+                WHERE book_id = bl.book_id 
+                AND patron_id = bl.patron_id
+                AND status = 'approved'
+                ORDER BY reserved_at DESC 
+                LIMIT 1
+            )
             WHERE bl.id = ?";
+    
     $stmt = $pdo->prepare($sql);
     $stmt->execute([$borrowId]);
     $borrow = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -32,7 +50,7 @@ try {
         throw new Exception('Borrow record not found');
     }
     
-    // Determine the new copy status based on return condition
+    // Determine the new copy status and condition based on return condition
     $copyStatus = 'available';
     $copyCondition = 'good';
     
@@ -46,15 +64,15 @@ try {
             $copyCondition = 'fair';
             break;
         case 'poor':
-            $copyStatus = 'maintenance'; // Needs maintenance
+            $copyStatus = 'available';  // Still available, just poor condition
             $copyCondition = 'poor';
             break;
         case 'damaged':
-            $copyStatus = 'damaged';
+            $copyStatus = 'damaged';  // Mark as damaged - NOT available for borrowing
             $copyCondition = 'damaged';
             break;
         case 'lost':
-            $copyStatus = 'lost';
+            $copyStatus = 'lost';  // Mark as lost
             $copyCondition = 'lost';
             break;
     }
@@ -70,6 +88,7 @@ try {
                     return_damage_description = ?,
                     return_condition = ?,
                     return_status = ?,
+                    return_book_condition = ?,
                     fee_paid = CASE WHEN ? > 0 THEN 0 ELSE 1 END
                   WHERE id = ?";
     
@@ -82,18 +101,111 @@ try {
         $damageDescription, 
         $returnCondition,
         $copyStatus,
+        $copyCondition,
         $totalFee,
         $borrowId
     ]);
     
-    // Update book copy status if copy exists
+    // CRITICAL: Find the ACTUAL book copy that was borrowed
+    // Strategy 1: Check if borrow record already has copy_id
+    // Strategy 2: Check reservation for copy_id
+    // Strategy 3: Find which copy of this book is currently borrowed by this patron
+    
+    $actualCopyId = null;
+    
+    // Strategy 1: Direct copy_id in borrow record
     if (!empty($borrow['copy_id'])) {
-        $updateCopy = "UPDATE book_copies SET 
-                        status = ?,
-                        book_condition = ?
-                      WHERE id = ?";
-        $stmt = $pdo->prepare($updateCopy);
-        $stmt->execute([$copyStatus, $copyCondition, $borrow['copy_id']]);
+        $actualCopyId = $borrow['copy_id'];
+    }
+    // Strategy 2: Copy_id from reservation
+    elseif (!empty($borrow['reservation_copy_id'])) {
+        $actualCopyId = $borrow['reservation_copy_id'];
+    }
+    // Strategy 3: Find the borrowed copy
+    else {
+        // Find which copy of this book is currently marked as borrowed for this patron
+        $findCopySql = "SELECT bc.id 
+                        FROM book_copies bc
+                        INNER JOIN borrow_logs bl ON bc.id = bl.book_copy_id
+                        WHERE bc.book_id = ? 
+                        AND bl.patron_id = ?
+                        AND bl.status IN ('borrowed', 'overdue')
+                        AND bc.status IN ('borrowed', 'reserved')
+                        LIMIT 1";
+        
+        $stmt = $pdo->prepare($findCopySql);
+        $stmt->execute([$borrow['book_id'], $borrow['patron_id']]);
+        $foundCopy = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if ($foundCopy && !empty($foundCopy['id'])) {
+            $actualCopyId = $foundCopy['id'];
+            
+            // Update the borrow log to link to this copy
+            $updateBorrowCopy = "UPDATE borrow_logs SET book_copy_id = ? WHERE id = ?";
+            $stmt = $pdo->prepare($updateBorrowCopy);
+            $stmt->execute([$actualCopyId, $borrowId]);
+        }
+    }
+    
+    // Now update the actual book copy
+    if (!empty($actualCopyId)) {
+        // First, get current status of the copy
+        $checkCopySql = "SELECT status, book_condition FROM book_copies WHERE id = ?";
+        $stmt = $pdo->prepare($checkCopySql);
+        $stmt->execute([$actualCopyId]);
+        $currentCopy = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if ($currentCopy) {
+            $updateCopy = "UPDATE book_copies SET 
+                            status = ?,
+                            book_condition = ?
+                          WHERE id = ?";
+            $stmt = $pdo->prepare($updateCopy);
+            $stmt->execute([$copyStatus, $copyCondition, $actualCopyId]);
+            
+            $affectedRows = $stmt->rowCount();
+            
+            // Verify the update
+            $verifySql = "SELECT status, book_condition FROM book_copies WHERE id = ?";
+            $stmt = $pdo->prepare($verifySql);
+            $stmt->execute([$actualCopyId]);
+            $updatedCopy = $stmt->fetch(PDO::FETCH_ASSOC);
+            
+            // Log the transaction
+            $transactionSql = "INSERT INTO copy_transactions 
+                              (book_copy_id, transaction_type, from_status, to_status, notes)
+                              VALUES (?, 'returned', ?, ?, ?)";
+            $stmt = $pdo->prepare($transactionSql);
+            $stmt->execute([
+                $actualCopyId,
+                $currentCopy['status'] ?? 'borrowed',
+                $copyStatus,
+                'Book returned - Copy #' . $actualCopyId . ' marked as ' . $copyStatus
+            ]);
+            
+            // Also update any reservation linked to this copy
+            $updateReservationSql = "UPDATE reservations 
+                                     SET status = 'fulfilled', 
+                                         updated_at = NOW()
+                                     WHERE book_copy_id = ? 
+                                     AND patron_id = ?
+                                     AND status = 'approved'";
+            $stmt = $pdo->prepare($updateReservationSql);
+            $stmt->execute([$actualCopyId, $borrow['patron_id']]);
+        }
+    } else {
+        // If we still can't find the copy, log an error but continue
+        error_log("WARNING: Could not find specific copy for borrow_id: $borrowId");
+        
+        // At minimum, update the book's available count by finding any borrowed copy
+        $updateAnyCopySql = "UPDATE book_copies bc
+                             INNER JOIN borrow_logs bl ON bc.id = bl.book_copy_id
+                             SET bc.status = ?,
+                                 bc.book_condition = ?
+                             WHERE bl.id = ? 
+                             AND bc.status IN ('borrowed', 'reserved')";
+        $stmt = $pdo->prepare($updateAnyCopySql);
+        $stmt->execute([$copyStatus, $copyCondition, $borrowId]);
     }
     
     // Generate receipt
@@ -118,7 +230,9 @@ try {
         'damage_types' => $damageTypes,
         'damage_description' => $damageDescription,
         'return_condition' => $returnCondition,
-        'copy_status' => $copyStatus
+        'copy_status' => $copyStatus,
+        'copy_condition' => $copyCondition,
+        'actual_copy_id' => $actualCopyId ?? 'Not found'
     ]);
     
     // Update receipt with PDF path
@@ -130,9 +244,14 @@ try {
     
     echo json_encode([
         'success' => true,
-        'message' => 'Book returned successfully. Copy marked as ' . $copyStatus . '.',
+        'message' => 'Book returned successfully. ' . 
+                    (empty($actualCopyId) ? 'Note: Specific copy not identified. ' : 'Copy #' . $actualCopyId . ' ') .
+                    'marked as ' . $copyStatus . ' (' . $copyCondition . ').',
         'receipt_pdf' => $pdfPath,
-        'receipt_number' => $receiptNumber
+        'receipt_number' => $receiptNumber,
+        'copy_status' => $copyStatus,
+        'copy_condition' => $copyCondition,
+        'copy_id' => $actualCopyId
     ]);
     
 } catch (Exception $e) {
@@ -177,6 +296,11 @@ function generateReceiptPDF($receiptNumber, $borrow, $feeData) {
     $pdf->Cell(40, 7, 'Author:', 0, 0);
     $pdf->Cell(0, 7, $borrow['author'], 0, 1);
     
+    if (!empty($borrow['copy_number'])) {
+        $pdf->Cell(40, 7, 'Copy Number:', 0, 0);
+        $pdf->Cell(0, 7, $borrow['copy_number'], 0, 1);
+    }
+    
     $pdf->Cell(40, 7, 'Borrow Date:', 0, 0);
     $pdf->Cell(0, 7, date('M d, Y', strtotime($borrow['borrowed_at'])), 0, 1);
     
@@ -189,8 +313,16 @@ function generateReceiptPDF($receiptNumber, $borrow, $feeData) {
     $pdf->Cell(40, 7, 'Copy Status:', 0, 0);
     $pdf->SetTextColor(67, 97, 238);
     $pdf->Cell(0, 7, ucfirst($feeData['copy_status']), 0, 1);
-    $pdf->SetTextColor(60, 60, 60);
     
+    $pdf->Cell(40, 7, 'Copy Condition:', 0, 0);
+    $pdf->Cell(0, 7, ucfirst($feeData['copy_condition']), 0, 1);
+    
+    if (!empty($feeData['actual_copy_id']) && $feeData['actual_copy_id'] !== 'Not found') {
+        $pdf->Cell(40, 7, 'Copy ID:', 0, 0);
+        $pdf->Cell(0, 7, $feeData['actual_copy_id'], 0, 1);
+    }
+    
+    $pdf->SetTextColor(60, 60, 60);
     $pdf->Ln(8);
     
     // Patron Information
@@ -236,6 +368,7 @@ function generateReceiptPDF($receiptNumber, $borrow, $feeData) {
     
     // Fee Summary
     $pdf->SetFont('Arial', 'B', 14);
+    $pdf->SetTextColor(0, 0, 0);
     $pdf->Cell(0, 8, 'FEE SUMMARY', 0, 1);
     $pdf->SetFont('Arial', '', 11);
     
@@ -243,7 +376,7 @@ function generateReceiptPDF($receiptNumber, $borrow, $feeData) {
     $pdf->SetFillColor(240, 240, 240);
     $pdf->SetDrawColor(200, 200, 200);
     $pdf->Cell(120, 10, 'Description', 1, 0, 'L', true);
-    $pdf->Cell(40, 10, 'Amount (₱)', 1, 1, 'R', true);
+    $pdf->Cell(40, 10, 'Amount', 1, 1, 'R', true);
     
     if ($feeData['late_fee'] > 0) {
         $pdf->Cell(120, 8, 'Overdue Fee', 1, 0, 'L');
@@ -262,11 +395,21 @@ function generateReceiptPDF($receiptNumber, $borrow, $feeData) {
     $pdf->Cell(40, 10, number_format($feeData['total_fee'], 2), 1, 1, 'R', true);
     $pdf->Ln(15);
     
-    // Footer
+    // Footer with status information
     $pdf->SetFont('Arial', 'I', 9);
     $pdf->SetTextColor(100, 100, 100);
+    
+    // Status explanation
+    if ($feeData['copy_status'] === 'damaged') {
+        $pdf->Cell(0, 6, 'NOTE: This book has been marked as DAMAGED and will not be available for future borrowing.', 0, 1, 'C');
+    } elseif ($feeData['copy_status'] === 'lost') {
+        $pdf->Cell(0, 6, 'NOTE: This book has been marked as LOST.', 0, 1, 'C');
+    } elseif ($feeData['copy_condition'] === 'poor') {
+        $pdf->Cell(0, 6, 'NOTE: This book is in POOR condition but remains available for borrowing.', 0, 1, 'C');
+    }
+    
+    $pdf->Cell(0, 6, 'Book copy status: ' . ucfirst($feeData['copy_status']) . ' | Condition: ' . ucfirst($feeData['copy_condition']), 0, 1, 'C');
     $pdf->Cell(0, 6, 'This receipt is computer generated and does not require a signature.', 0, 1, 'C');
-    $pdf->Cell(0, 6, 'Book copy status: ' . ucfirst($feeData['copy_status']), 0, 1, 'C');
     $pdf->Cell(0, 6, 'Thank you for using the library!', 0, 1, 'C');
     
     // Save PDF

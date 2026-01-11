@@ -33,7 +33,7 @@ $dateFrom = isset($_GET['date_from']) ? trim($_GET['date_from']) : '';
 $dateTo = isset($_GET['date_to']) ? trim($_GET['date_to']) : '';
 
 // Pagination settings
-$itemsPerPage = 3; // Show only 3 items per page as requested
+$itemsPerPage = 10;
 $currentPage = isset($_GET['page']) ? max(1, intval($_GET['page'])) : 1;
 $offset = ($currentPage - 1) * $itemsPerPage;
 
@@ -53,18 +53,6 @@ if ($currentFilter !== 'all') {
 // Always exclude fulfilled reservations unless specifically filtered
 if ($currentFilter !== 'fulfilled') {
     $whereConditions[] = 'r.status <> "fulfilled"';
-}
-
-// FIXED: Don't exclude reservations with unreturned borrow logs
-// This was hiding reservations for books that are currently borrowed
-if ($currentFilter === 'pending') {
-    // For pending reservations, we don't want to show ones that already have borrow logs
-    $whereConditions[] = 'NOT EXISTS (
-        SELECT 1 FROM borrow_logs bl 
-        WHERE bl.book_id = r.book_id 
-        AND bl.patron_id = r.patron_id 
-        AND bl.status = "borrowed"
-    )';
 }
 
 // Search conditions
@@ -113,7 +101,7 @@ $countStmt = $pdo->prepare($countSql);
 $countStmt->execute($params);
 $counts = $countStmt->fetch(PDO::FETCH_ASSOC);
 
-// Fetch reservation requests with pagination - UPDATED QUERY
+// Fetch reservation requests with pagination
 try {
     // First, get total count for pagination
     $totalSql = "SELECT COUNT(*) as total FROM reservations r
@@ -134,98 +122,57 @@ try {
         $offset = ($currentPage - 1) * $itemsPerPage;
     }
     
-  // Now fetch the actual data with pagination - FIXED QUERY WITH DISTINCT
-// Now fetch the actual data with pagination - FIXED QUERY
-$sql = "SELECT 
-        r.id, r.book_id, r.book_copy_id, r.patron_id, r.reserved_at, r.expiration_date, r.notes,
-        b.title AS book_name, b.author AS book_author, b.isbn, b.category_id, 
-        COALESCE(b.cover_image_cache, b.cover_image) AS book_cover,
-        r.status, r.reason, r.reservation_type,
-        u.role AS user_role, u.name AS user_name, u.username, u.email, u.student_id,
-        p.library_id, p.department, p.semester,
-        bl.id AS borrow_id,
-        bl.due_date AS borrow_due_date,
-        bl.status AS borrow_status,
-        bc.copy_number, bc.id as copy_id,
-        bc.current_section, bc.current_shelf, bc.current_row, bc.current_slot,
-        c.name AS category_name,
-        c.default_section AS category_section,
-        c.shelf_recommendation, c.row_recommendation, c.slot_recommendation
-    FROM reservations r
-    JOIN books b ON r.book_id = b.id
-    LEFT JOIN categories c ON b.category_id = c.id
-    JOIN patrons p ON r.patron_id = p.id
-    LEFT JOIN users u ON u.patron_id = p.id
-    LEFT JOIN borrow_logs bl ON bl.id = (
-        SELECT id FROM borrow_logs 
-        WHERE book_id = r.book_id 
-          AND patron_id = r.patron_id 
-          AND status IN ('borrowed', 'overdue')
-          AND (r.book_copy_id IS NULL OR book_copy_id = r.book_copy_id)
-        ORDER BY borrowed_at DESC 
-        LIMIT 1
-    )
-    LEFT JOIN book_copies bc ON bc.id = r.book_copy_id
-    $whereClause
-    ORDER BY 
-        CASE 
-            WHEN r.status = 'pending' THEN 1
-            WHEN r.status = 'approved' THEN 2
-            ELSE 3
-        END,
-        r.reserved_at DESC
-    LIMIT $itemsPerPage OFFSET $offset";
+    // Now fetch the actual data with pagination - IMPROVED QUERY
+    $sql = "SELECT 
+            r.id, r.book_id, r.book_copy_id, r.patron_id, r.reserved_at, r.expiration_date, r.notes,
+            b.title AS book_name, b.author AS book_author, b.isbn, b.category_id, 
+            COALESCE(b.cover_image_cache, b.cover_image) AS book_cover,
+            r.status, r.reason, r.reservation_type,
+            u.role AS user_role, u.name AS user_name, u.username, u.email, u.student_id,
+            p.library_id, p.department, p.semester,
+            bl.id AS borrow_id,
+            bl.due_date AS borrow_due_date,
+            bl.status AS borrow_status,
+            bc.copy_number, bc.id as copy_id,
+            bc.current_section, bc.current_shelf, bc.current_row, bc.current_slot,
+            c.name AS category_name,
+            c.default_section AS category_section,
+            c.shelf_recommendation, c.row_recommendation, c.slot_recommendation,
+            -- Count how many copies of this book the patron currently has borrowed
+            (SELECT COUNT(*) FROM borrow_logs bl2 
+             WHERE bl2.book_id = r.book_id 
+             AND bl2.patron_id = r.patron_id 
+             AND bl2.status IN ('borrowed', 'overdue')) as active_borrows_for_book,
+            -- Count how many pending reservations the patron has for this same book
+            (SELECT COUNT(*) FROM reservations r2 
+             WHERE r2.book_id = r.book_id 
+             AND r2.patron_id = r.patron_id 
+             AND r2.status = 'pending') as pending_reservations_for_book
+        FROM reservations r
+        JOIN books b ON r.book_id = b.id
+        LEFT JOIN categories c ON b.category_id = c.id
+        JOIN patrons p ON r.patron_id = p.id
+        LEFT JOIN users u ON u.patron_id = p.id
+        LEFT JOIN borrow_logs bl ON bl.book_copy_id = r.book_copy_id 
+            AND bl.patron_id = r.patron_id 
+            AND bl.status IN ('borrowed', 'overdue')
+        LEFT JOIN book_copies bc ON bc.id = r.book_copy_id
+        $whereClause
+        ORDER BY 
+            CASE 
+                WHEN r.status = 'pending' THEN 1
+                WHEN r.status = 'approved' THEN 2
+                ELSE 3
+            END,
+            r.reserved_at DESC
+        LIMIT $itemsPerPage OFFSET $offset";
     
     $stmt = $pdo->prepare($sql);
     $stmt->execute($params);
     $requests = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
 } catch (PDOException $ex) {
-    // Fallback if new columns don't exist
-    if ($ex->getCode() === '42S22') {
-        // Recalculate total with fallback query
-        $totalSql = "SELECT COUNT(*) as total FROM reservations r
-                    JOIN books b ON r.book_id = b.id
-                    JOIN patrons p ON r.patron_id = p.id
-                    LEFT JOIN users u ON u.patron_id = p.id
-                    $whereClause";
-        
-        $totalStmt = $pdo->prepare($totalSql);
-        $totalStmt->execute($params);
-        $totalResult = $totalStmt->fetch(PDO::FETCH_ASSOC);
-        $totalItems = $totalResult['total'] ?? 0;
-        $totalPages = ceil($totalItems / $itemsPerPage);
-        
-        // Adjust current page
-        if ($currentPage > $totalPages && $totalPages > 0) {
-            $currentPage = $totalPages;
-            $offset = ($currentPage - 1) * $itemsPerPage;
-        }
-        
-        $sql = "SELECT r.id, r.book_id, r.patron_id, r.reserved_at, r.expiration_date,
-                       b.title AS book_name, b.author AS book_author,
-                       r.status, NULL AS reason,
-                       u.role AS user_role, u.name AS user_name, u.username, u.email, u.student_id,
-                       p.library_id,
-                       bl.id AS borrow_id,
-                       bl.due_date AS borrow_due_date,
-                       bl.status AS borrow_status
-                FROM reservations r
-                JOIN books b ON r.book_id = b.id
-                JOIN patrons p ON r.patron_id = p.id
-                LEFT JOIN users u ON u.patron_id = p.id
-                LEFT JOIN borrow_logs bl ON bl.book_id = r.book_id 
-                    AND bl.patron_id = r.patron_id 
-                    AND bl.status IN ('borrowed', 'overdue')
-                $whereClause
-                ORDER BY r.reserved_at DESC
-                LIMIT $itemsPerPage OFFSET $offset";
-        
-        $stmt = $pdo->prepare($sql);
-        $stmt->execute($params);
-        $requests = $stmt->fetchAll(PDO::FETCH_ASSOC);
-    } else {
-        throw $ex;
-    }
+    die("Database error: " . $ex->getMessage());
 }
 
 // Store requests data for JavaScript access
@@ -432,18 +379,17 @@ include __DIR__ . '/_header.php';
                         $patronId = (int)($row['patron_id'] ?? 0);
                         $borrowId = isset($row['borrow_id']) ? (int)$row['borrow_id'] : 0;
                         $copyId = isset($row['copy_id']) ? (int)$row['copy_id'] : null;
+                        $activeBorrows = isset($row['active_borrows_for_book']) ? (int)$row['active_borrows_for_book'] : 0;
+                        $pendingReservations = isset($row['pending_reservations_for_book']) ? (int)$row['pending_reservations_for_book'] : 0;
                         
-                        // Get book cover image - SIMPLIFIED: Just use the path directly
+                        // Get book cover image
                         $bookCover = null;
                         if (!empty($row['book_cover'])) {
                             $bookCover = $row['book_cover'];
                         }
                         
-                        // SIMPLIFIED: Just construct the path and let the browser handle it
-                        // If the image doesn't exist, the onerror handler will show default
                         $coverUrl = '../assets/images/default-book-cover.jpg';
                         if ($bookCover) {
-                            // Direct path to covers directory
                             $coverUrl = '../uploads/covers/' . htmlspecialchars($bookCover);
                         }
                         
@@ -472,6 +418,9 @@ include __DIR__ . '/_header.php';
                             </div>
                             <span class="request-status" style="background: <?php echo $statusColor; ?>20; color: <?php echo $statusColor; ?>; border-color: <?php echo $statusColor; ?>;">
                                 <?php echo ucfirst($status); ?>
+                                <?php if ($activeBorrows > 0 && $status === 'pending'): ?>
+                                    <br><small>(Patron has <?php echo $activeBorrows; ?> active)</small>
+                                <?php endif; ?>
                             </span>
                         </div>
                         
@@ -495,10 +444,18 @@ include __DIR__ . '/_header.php';
                                     <?php if (!empty($row['copy_number'])): ?>
                                     <span class="meta-item copy-tag">Copy #<?php echo htmlspecialchars($row['copy_number']); ?></span>
                                     <?php endif; ?>
+                                    <?php if (!empty($row['copy_id'])): ?>
+                                    <span class="meta-item copy-id">Copy ID: <?php echo htmlspecialchars($row['copy_id']); ?></span>
+                                    <?php endif; ?>
                                 </div>
                                 <?php if (!empty($row['notes'])): ?>
                                 <div class="request-notes">
                                     <strong>Notes:</strong> <?php echo htmlspecialchars($row['notes']); ?>
+                                </div>
+                                <?php endif; ?>
+                                <?php if ($status === 'pending' && $pendingReservations > 1): ?>
+                                <div class="request-notes" style="background: #fff3cd; border-left-color: #ffc107;">
+                                    <strong>Note:</strong> Patron has <?php echo $pendingReservations; ?> pending reservations for this book
                                 </div>
                                 <?php endif; ?>
                             </div>
@@ -569,12 +526,14 @@ include __DIR__ . '/_header.php';
                                         data-res-id="<?php echo $resId; ?>" 
                                         data-book-id="<?php echo $bookId; ?>" 
                                         data-patron-id="<?php echo $patronId; ?>"
-                                        data-copy-id="<?php echo $bookCopyId; ?>">
+                                        data-copy-id="<?php echo $bookCopyId; ?>"
+                                        data-active-borrows="<?php echo $activeBorrows; ?>"
+                                        data-pending-reservations="<?php echo $pendingReservations; ?>">
                                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                         <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
                                         <polyline points="22 4 12 14.01 9 11.01"/>
                                     </svg>
-                                    Accept
+                                    <?php echo $pendingReservations > 1 ? "Accept All (" . $pendingReservations . ")" : "Accept"; ?>
                                 </button>
                                 <button class="btn-action btn-decline" 
                                         data-res-id="<?php echo $resId; ?>">
@@ -875,7 +834,7 @@ function viewReservationDetails(resId) {
                 day: 'numeric'
             }) : 'N/A';
         
-        // Get book cover image - SIMPLIFIED: Use direct path
+        // Get book cover image
         let bookCoverUrl = '../assets/images/default-book-cover.jpg';
         if (reservation.book_cover) {
             bookCoverUrl = '../uploads/covers/' + escapeHtml(reservation.book_cover);
@@ -913,6 +872,14 @@ function viewReservationDetails(resId) {
                         <span class="detail-value">${reservation.reservation_type === 'specific_copy' ? 'Specific Copy' : 'Any Available Copy'}</span>
                     </div>
                     <div class="detail-item">
+                        <span class="detail-label">Book Copy ID:</span>
+                        <span class="detail-value">${reservation.copy_id || 'Not assigned yet'}</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Copy Number:</span>
+                        <span class="detail-value">${reservation.copy_number || 'Not assigned yet'}</span>
+                    </div>
+                    <div class="detail-item">
                         <span class="detail-label">Reserved Date:</span>
                         <span class="detail-value">${reservedDate}</span>
                     </div>
@@ -920,6 +887,12 @@ function viewReservationDetails(resId) {
                         <span class="detail-label">Expiration Date:</span>
                         <span class="detail-value">${expirationDate}</span>
                     </div>
+                    ${reservation.active_borrows_for_book > 0 ? `
+                    <div class="detail-item">
+                        <span class="detail-label">Active Borrows for this Book:</span>
+                        <span class="detail-value">${reservation.active_borrows_for_book}</span>
+                    </div>
+                    ` : ''}
                     ${reservation.borrow_due_date ? `
                     <div class="detail-item">
                         <span class="detail-label">Due Date:</span>
@@ -978,10 +951,6 @@ function viewReservationDetails(resId) {
                         <span class="detail-label">Section:</span>
                         <span class="detail-value">${reservation.current_section || reservation.category_section || 'A'}</span>
                     </div>
-                    ${reservation.copy_number ? `<div class="detail-item">
-                        <span class="detail-label">Copy Number:</span>
-                        <span class="detail-value">${escapeHtml(reservation.copy_number)}</span>
-                    </div>` : ''}
                 </div>
             `;
         }
@@ -1041,9 +1010,15 @@ function closeDetailsModal() {
     document.body.style.overflow = 'auto';
 }
 
-// Accept reservation - UPDATED TO PREVENT DUPLICATES
-async function acceptReservation(resId, bookId, patronId, copyId = null) {
-    if (!confirm('Approve this reservation?')) return;
+// Accept reservation - FIXED TO HANDLE MULTIPLE COPIES
+async function acceptReservation(resId, bookId, patronId, copyId = null, activeBorrows = 0, pendingReservations = 1) {
+    // Show confirmation message based on pending reservations count
+    let confirmMessage = 'Approve this reservation?';
+    if (pendingReservations > 1) {
+        confirmMessage = `Patron has ${pendingReservations} pending reservations for this book. Approve ALL ${pendingReservations} reservations?`;
+    }
+    
+    if (!confirm(confirmMessage)) return;
     
     const btn = document.querySelector(`.btn-accept[data-res-id="${resId}"]`);
     const originalText = btn.innerHTML;
@@ -1051,62 +1026,15 @@ async function acceptReservation(resId, bookId, patronId, copyId = null) {
     btn.disabled = true;
     
     try {
-        // First, find an available copy if no specific copy is reserved
-        let actualCopyId = copyId;
-        if (!actualCopyId || actualCopyId === 'null' || actualCopyId === '0') {
-            // Find first available copy
-            const copyRes = await fetch(`../api/get_available_copy.php?book_id=${bookId}`);
-            if (copyRes.ok) {
-                const copyData = await copyRes.json();
-                if (copyData.available_copy_id) {
-                    actualCopyId = copyData.available_copy_id;
-                }
-            }
-        }
-        
-        if (!actualCopyId || actualCopyId === 'null' || actualCopyId === '0') {
-            throw new Error('No available copy found for this book');
-        }
-        
-        // First, check if there's already an active borrow for this book copy
-        const checkRes = await fetch(`../api/check_existing_borrow.php?book_copy_id=${actualCopyId}&patron_id=${patronId}`);
-        const checkData = await checkRes.json();
-        
-        if (checkData.exists) {
-            // Update existing reservation without creating new borrow
-            const res = await fetch(`../api/dispatch.php?resource=reservations&id=${resId}`, {
-                method: 'PUT',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRF-Token': csrfToken
-                },
-                body: JSON.stringify({ 
-                    status: 'approved',
-                    book_copy_id: actualCopyId 
-                })
-            });
-            
-            const out = await res.json();
-            
-            if (!res.ok) {
-                throw new Error(out.error || 'Approval failed');
-            }
-            
-            showToast('Reservation approved! (Book already borrowed)', 'success');
-            setTimeout(() => window.location.reload(), 1000);
-            return;
-        }
-        
-        // Update reservation to link to specific copy
-        const res = await fetch(`../api/dispatch.php?resource=reservations&id=${resId}`, {
-            method: 'PUT',
+        // Use the stored procedure to process all pending reservations for this book and patron
+        const res = await fetch(`../api/dispatch.php?resource=reservations_accept_all&book_id=${bookId}&patron_id=${patronId}&starting_reservation_id=${resId}`, {
+            method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 'X-CSRF-Token': csrfToken
             },
             body: JSON.stringify({ 
-                status: 'approved',
-                book_copy_id: actualCopyId 
+                status: 'approved'
             })
         });
         
@@ -1116,60 +1044,17 @@ async function acceptReservation(resId, bookId, patronId, copyId = null) {
             throw new Error(out.error || 'Approval failed');
         }
         
-        // Update book copy status to borrowed (not reserved)
-        await fetch(`../api/dispatch.php?resource=book_copies&id=${actualCopyId}`, {
-            method: 'PUT',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-CSRF-Token': csrfToken
-            },
-            body: JSON.stringify({
-                status: 'borrowed'
-            })
-        });
-        
-        // Create borrow log using the safe method
-        const now = new Date();
-        const borrowedAt = now.toISOString().slice(0, 19).replace('T', ' ');
-        const dueDate = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000); // 14 days
-        const formattedDueDate = dueDate.toISOString().slice(0, 19).replace('T', ' ');
-        
-        const borrowRes = await fetch('../api/dispatch.php?resource=borrow_logs', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-CSRF-Token': csrfToken
-            },
-            body: JSON.stringify({
-                book_id: parseInt(bookId),
-                book_copy_id: parseInt(actualCopyId),
-                patron_id: parseInt(patronId),
-                borrowed_at: borrowedAt,
-                due_date: formattedDueDate,
-                status: 'borrowed',
-                notes: `Reservation ID: ${resId}`
-            })
-        });
-        
-        const borrowOut = await borrowRes.json();
-        
-        if (!borrowRes.ok) {
-            // If duplicate error, still show success but don't create new borrow
-            if (borrowOut.error && borrowOut.error.includes('Duplicate')) {
-                showToast('Reservation approved! (Book already borrowed)', 'success');
-            } else {
-                console.warn('Borrow log creation warning:', borrowOut.error);
-                showToast('Reservation approved with warning: ' + borrowOut.error, 'warning');
-            }
+        if (out.reservations_processed > 0) {
+            showToast(`Successfully approved ${out.reservations_processed} reservation(s) and created ${out.borrow_logs_created} borrow record(s)!`, 'success');
         } else {
-            showToast('Reservation approved successfully!', 'success');
+            showToast('Reservation approved, but no new borrow logs were created (possibly already processed).', 'warning');
         }
         
-        setTimeout(() => window.location.reload(), 1000);
+        setTimeout(() => window.location.reload(), 1500);
         
     } catch (err) {
         console.error('Error:', err);
-        showToast(err.message || 'Failed to approve reservation', 'error');
+        showToast(err.message || 'Failed to approve reservation(s)', 'error');
         btn.innerHTML = originalText;
         btn.disabled = false;
     }
@@ -1333,7 +1218,7 @@ async function submitEdit() {
     }
 }
 
-// Return book - Updated to return to correct location and make available
+// Return book
 async function returnBook(resId, borrowId, bookId, copyId = null) {
     if (!confirm('Mark this book as returned?')) return;
     
@@ -1454,7 +1339,9 @@ document.addEventListener('DOMContentLoaded', () => {
             const bookId = btn.getAttribute('data-book-id');
             const patronId = btn.getAttribute('data-patron-id');
             const copyId = btn.getAttribute('data-copy-id');
-            acceptReservation(resId, bookId, patronId, copyId);
+            const activeBorrows = btn.getAttribute('data-active-borrows') || 0;
+            const pendingReservations = btn.getAttribute('data-pending-reservations') || 1;
+            acceptReservation(resId, bookId, patronId, copyId, activeBorrows, pendingReservations);
         });
     });
     
@@ -1501,6 +1388,7 @@ document.addEventListener('DOMContentLoaded', () => {
 </script>
 
 <style>
+
 /* Modern Design System */
 :root {
     --primary: #4f46e5;
@@ -1969,6 +1857,17 @@ document.addEventListener('DOMContentLoaded', () => {
     letter-spacing: 0.5px;
     border: 1px solid;
     white-space: nowrap;
+    text-align: center;
+    line-height: 1.2;
+}
+
+.request-status small {
+    font-size: 0.65rem;
+    font-weight: 400;
+    text-transform: none;
+    letter-spacing: normal;
+    display: block;
+    margin-top: 2px;
 }
 
 /* Book Info with Cover */

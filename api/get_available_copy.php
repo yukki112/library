@@ -1,5 +1,5 @@
 <?php
-// get_available_copy.php
+require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/db.php';
 require_once __DIR__ . '/../includes/config.php';
 
@@ -8,39 +8,76 @@ header('Content-Type: application/json');
 try {
     $pdo = DB::conn();
     
-    $book_id = $_GET['book_id'] ?? null;
+    $bookId = isset($_GET['book_id']) ? (int)$_GET['book_id'] : 0;
+    $patronId = isset($_GET['patron_id']) ? (int)$_GET['patron_id'] : 0;
     
-    if (!$book_id) {
-        throw new Exception('Missing book_id parameter');
+    if ($bookId <= 0) {
+        throw new Exception('Invalid book ID');
     }
     
-    // Find first available copy
-    $stmt = $pdo->prepare("
-        SELECT id, copy_number, barcode 
-        FROM book_copies 
-        WHERE book_id = ? 
-          AND status = 'available' 
-          AND is_active = 1
-        ORDER BY id ASC 
-        LIMIT 1
-    ");
-    $stmt->execute([$book_id]);
-    $copy = $stmt->fetch();
+    // Find an available copy that is NOT currently borrowed by this patron
+    $sql = "SELECT bc.id as available_copy_id, bc.copy_number
+            FROM book_copies bc
+            WHERE bc.book_id = :book_id
+              AND bc.status = 'available'
+              AND bc.is_active = 1
+              AND NOT EXISTS (
+                  SELECT 1 FROM borrow_logs bl 
+                  WHERE bl.book_copy_id = bc.id 
+                    AND bl.patron_id = :patron_id 
+                    AND bl.status IN ('borrowed', 'overdue')
+              )
+            ORDER BY bc.id ASC
+            LIMIT 1";
+    
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute([
+        ':book_id' => $bookId,
+        ':patron_id' => $patronId
+    ]);
+    
+    $copy = $stmt->fetch(PDO::FETCH_ASSOC);
     
     if ($copy) {
         echo json_encode([
-            'available_copy_id' => $copy['id'],
-            'copy_number' => $copy['copy_number'],
-            'barcode' => $copy['barcode']
+            'success' => true,
+            'available_copy_id' => $copy['available_copy_id'],
+            'copy_number' => $copy['copy_number']
         ]);
     } else {
-        echo json_encode([
-            'available_copy_id' => null,
-            'message' => 'No available copies found'
-        ]);
+        // Try to find any available copy
+        $sql2 = "SELECT bc.id as available_copy_id, bc.copy_number
+                 FROM book_copies bc
+                 WHERE bc.book_id = :book_id
+                   AND bc.status = 'available'
+                   AND bc.is_active = 1
+                 ORDER BY bc.id ASC
+                 LIMIT 1";
+        
+        $stmt2 = $pdo->prepare($sql2);
+        $stmt2->execute([':book_id' => $bookId]);
+        $copy2 = $stmt2->fetch(PDO::FETCH_ASSOC);
+        
+        if ($copy2) {
+            echo json_encode([
+                'success' => true,
+                'available_copy_id' => $copy2['available_copy_id'],
+                'copy_number' => $copy2['copy_number'],
+                'warning' => 'Copy found but patron might already have another copy borrowed'
+            ]);
+        } else {
+            echo json_encode([
+                'success' => false,
+                'message' => 'No available copies found'
+            ]);
+        }
     }
     
 } catch (Exception $e) {
-    http_response_code(400);
-    echo json_encode(['error' => $e->getMessage()]);
+    http_response_code(500);
+    echo json_encode([
+        'success' => false,
+        'message' => $e->getMessage()
+    ]);
 }
+?>

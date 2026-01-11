@@ -11,19 +11,28 @@ $filter = $_GET['filter'] ?? 'all';
 $student_id = $_GET['student_id'] ?? '';
 $status_filter = $_GET['status'] ?? '';
 
+// Pagination settings
+$items_per_page = 3; // Show 3 items per page
+$current_page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
+$offset = ($current_page - 1) * $items_per_page;
+
 // Build query with filters
 $params = [];
 $whereClauses = [];
 
+// Determine which tab is active
+$activeTab = 'active'; // Default tab
+
 if ($filter === 'overdue') {
     $whereClauses[] = "bl.status = 'overdue'";
-} elseif ($filter === 'active') {
-    $whereClauses[] = "bl.status = 'borrowed'";
+    $activeTab = 'overdue';
 } elseif ($filter === 'returned') {
     $whereClauses[] = "bl.status = 'returned'";
+    $activeTab = 'returned';
 } else {
-    // Default: all non-returned
-    $whereClauses[] = "bl.status <> 'returned'";
+    // Default: show all non-returned (active + overdue)
+    $whereClauses[] = "bl.status IN ('borrowed', 'overdue')";
+    $activeTab = 'active';
 }
 
 if (!empty($student_id)) {
@@ -39,7 +48,22 @@ if (!empty($status_filter) && in_array($status_filter, ['borrowed', 'overdue', '
 
 $whereSQL = !empty($whereClauses) ? "WHERE " . implode(" AND ", $whereClauses) : "";
 
-// Get borrow logs with detailed information including book copies
+// First, get total count for pagination
+$countSql = "SELECT COUNT(*) as total 
+             FROM borrow_logs bl
+             JOIN books b ON bl.book_id = b.id
+             JOIN book_copies bc ON bl.book_copy_id = bc.id
+             JOIN patrons p ON bl.patron_id = p.id
+             LEFT JOIN users u ON u.patron_id = p.id
+             LEFT JOIN categories c ON b.category_id = c.id
+             LEFT JOIN receipts rc ON rc.borrow_log_id = bl.id AND rc.status = 'paid'
+             $whereSQL";
+
+$countStmt = $pdo->prepare($countSql);
+$countStmt->execute($params);
+$totalCount = $countStmt->fetch(PDO::FETCH_ASSOC)['total'];
+$totalPages = ceil($totalCount / $items_per_page);
+
 $sql = "SELECT 
             bl.id, 
             bl.book_id,
@@ -81,7 +105,7 @@ $sql = "SELECT
             rc.pdf_path
         FROM borrow_logs bl
         JOIN books b ON bl.book_id = b.id
-        LEFT JOIN book_copies bc ON bl.book_copy_id = bc.id
+        JOIN book_copies bc ON bl.book_copy_id = bc.id
         JOIN patrons p ON bl.patron_id = p.id
         LEFT JOIN users u ON u.patron_id = p.id
         LEFT JOIN categories c ON b.category_id = c.id
@@ -92,10 +116,22 @@ $sql = "SELECT
                  WHEN bl.status = 'borrowed' THEN 2 
                  ELSE 3 END,
             bl.due_date ASC, 
-            bl.borrowed_at DESC";
-
+            bl.borrowed_at DESC
+        LIMIT :limit OFFSET :offset";
+        
 $stmt = $pdo->prepare($sql);
-$stmt->execute($params);
+$params[':limit'] = $items_per_page;
+$params[':offset'] = $offset;
+
+foreach ($params as $key => $value) {
+    if ($key === ':limit' || $key === ':offset') {
+        $stmt->bindValue($key, $value, PDO::PARAM_INT);
+    } else {
+        $stmt->bindValue($key, $value);
+    }
+}
+
+$stmt->execute();
 $issued = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // Get damage types for the form
@@ -103,7 +139,6 @@ $damageTypes = $pdo->query("SELECT * FROM damage_types WHERE is_active = 1")->fe
 
 include __DIR__ . '/_header.php';
 ?>
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -668,6 +703,20 @@ include __DIR__ . '/_header.php';
             background: linear-gradient(135deg, #f72585, #b5179e);
         }
         
+        /* Pagination Styles */
+        .pagination-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            margin-top: 30px;
+            gap: 15px;
+        }
+        
+        .page-info {
+            font-weight: 600;
+            color: #495057;
+        }
+        
         /* Responsive Design */
         @media (max-width: 768px) {
             .container {
@@ -702,6 +751,11 @@ include __DIR__ . '/_header.php';
             .modal-content {
                 width: 95%;
                 margin: 20px auto;
+            }
+            
+            .pagination-container {
+                flex-direction: column;
+                gap: 10px;
             }
         }
         
@@ -750,13 +804,13 @@ include __DIR__ . '/_header.php';
 
         <!-- Tab Navigation -->
         <div class="tab-navigation">
-            <button class="tab-btn active" onclick="switchTab('active')">
+            <button class="tab-btn <?= $activeTab === 'active' ? 'active' : '' ?>" onclick="switchTab('active')">
                 <i class="fas fa-book me-2"></i>Active Borrows
             </button>
-            <button class="tab-btn" onclick="switchTab('returned')">
+            <button class="tab-btn <?= $activeTab === 'returned' ? 'active' : '' ?>" onclick="switchTab('returned')">
                 <i class="fas fa-history me-2"></i>Return History
             </button>
-            <button class="tab-btn" onclick="switchTab('overdue')">
+            <button class="tab-btn <?= $activeTab === 'overdue' ? 'active' : '' ?>" onclick="switchTab('overdue')">
                 <i class="fas fa-exclamation-triangle me-2"></i>Overdue Books
             </button>
         </div>
@@ -803,22 +857,30 @@ include __DIR__ . '/_header.php';
         </div>
 
         <!-- Active Borrows Tab -->
-        <div id="active-tab" class="tab-content active">
+        <div id="active-tab" class="tab-content <?= $activeTab === 'active' ? 'active' : '' ?>">
             <div class="card">
                 <div class="card-header d-flex justify-content-between align-items-center">
                     <div>
-                        <i class="fas fa-clipboard-list me-2"></i>Borrowed Books List
+                        <i class="fas fa-clipboard-list me-2"></i>Active Borrows (Borrowed + Overdue)
                     </div>
                     <div>
                         <?php 
-                        $totalCount = count(array_filter($issued, function($item) {
-                            return $item['status'] !== 'returned';
-                        }));
-                        $overdueCount = count(array_filter($issued, function($item) {
-                            return $item['status'] === 'overdue';
-                        }));
+                        // Count borrowed and overdue items from the filtered results
+                        $borrowedCount = 0;
+                        $overdueCount = 0;
+                        foreach ($issued as $item) {
+                            if ($item['status'] === 'borrowed') {
+                                $borrowedCount++;
+                            } elseif ($item['status'] === 'overdue') {
+                                $overdueCount++;
+                            }
+                        }
+                        $totalActiveCount = $borrowedCount + $overdueCount;
                         ?>
-                        <span class="badge bg-primary rounded-pill px-3 py-2">Total: <?= $totalCount ?></span>
+                        <span class="badge bg-primary rounded-pill px-3 py-2">Total: <?= $totalActiveCount ?></span>
+                        <?php if ($borrowedCount > 0): ?>
+                            <span class="badge bg-info rounded-pill px-3 py-2">Borrowed: <?= $borrowedCount ?></span>
+                        <?php endif; ?>
                         <?php if ($overdueCount > 0): ?>
                             <span class="badge bg-danger rounded-pill px-3 py-2">Overdue: <?= $overdueCount ?></span>
                         <?php endif; ?>
@@ -1011,13 +1073,57 @@ include __DIR__ . '/_header.php';
                                 </tbody>
                             </table>
                         </div>
+                        
+                        <!-- Pagination -->
+                        <?php if ($totalPages > 1): ?>
+                        <div class="pagination-container">
+                            <nav aria-label="Page navigation">
+                                <ul class="pagination">
+                                    <?php if ($current_page > 1): ?>
+                                        <li class="page-item">
+                                            <a class="page-link" 
+                                               href="?filter=<?= $filter ?>&page=<?= $current_page - 1 ?>&student_id=<?= $student_id ?>&status=<?= $status_filter ?>">
+                                                <i class="fas fa-chevron-left"></i> Previous
+                                            </a>
+                                        </li>
+                                    <?php endif; ?>
+                                    
+                                    <?php 
+                                    $startPage = max(1, $current_page - 2);
+                                    $endPage = min($totalPages, $current_page + 2);
+                                    
+                                    for ($i = $startPage; $i <= $endPage; $i++): 
+                                    ?>
+                                        <li class="page-item <?= $i == $current_page ? 'active' : '' ?>">
+                                            <a class="page-link" 
+                                               href="?filter=<?= $filter ?>&page=<?= $i ?>&student_id=<?= $student_id ?>&status=<?= $status_filter ?>">
+                                                <?= $i ?>
+                                            </a>
+                                        </li>
+                                    <?php endfor; ?>
+                                    
+                                    <?php if ($current_page < $totalPages): ?>
+                                        <li class="page-item">
+                                            <a class="page-link" 
+                                               href="?filter=<?= $filter ?>&page=<?= $current_page + 1 ?>&student_id=<?= $student_id ?>&status=<?= $status_filter ?>">
+                                                Next <i class="fas fa-chevron-right"></i>
+                                            </a>
+                                        </li>
+                                    <?php endif; ?>
+                                </ul>
+                            </nav>
+                            <div class="page-info">
+                                Page <?= $current_page ?> of <?= $totalPages ?> (Total: <?= $totalCount ?> items)
+                            </div>
+                        </div>
+                        <?php endif; ?>
                     <?php endif; ?>
                 </div>
             </div>
         </div>
 
         <!-- Return History Tab -->
-        <div id="returned-tab" class="tab-content">
+        <div id="returned-tab" class="tab-content <?= $activeTab === 'returned' ? 'active' : '' ?>">
             <div class="card">
                 <div class="card-header d-flex justify-content-between align-items-center">
                     <div>
@@ -1025,20 +1131,15 @@ include __DIR__ . '/_header.php';
                     </div>
                     <div>
                         <?php 
-                        $returnedCount = count(array_filter($issued, function($item) {
+                        $returnedBooks = array_filter($issued, function($item) {
                             return $item['status'] === 'returned';
-                        }));
+                        });
+                        $returnedCount = count($returnedBooks);
                         ?>
                         <span class="badge bg-success rounded-pill px-3 py-2">Total Returns: <?= $returnedCount ?></span>
                     </div>
                 </div>
                 <div class="card-body">
-                    <?php 
-                    $returnedBooks = array_filter($issued, function($item) {
-                        return $item['status'] === 'returned';
-                    });
-                    ?>
-                    
                     <?php if (empty($returnedBooks)): ?>
                         <div class="empty-state">
                             <i class="fas fa-history fa-4x mb-4"></i>
@@ -1091,8 +1192,10 @@ include __DIR__ . '/_header.php';
                                             <small class="text-muted"><?= htmlspecialchars($row['library_id']) ?></small>
                                         </td>
                                         <td style="width: 15%;">
-                                            <?= date('M d, Y', strtotime($row['returned_at'])) ?><br>
-                                            <small class="text-muted"><?= date('h:i A', strtotime($row['returned_at'])) ?></small>
+                                            <?= $row['returned_at'] ? date('M d, Y', strtotime($row['returned_at'])) : 'N/A' ?><br>
+                                            <?php if ($row['returned_at']): ?>
+                                                <small class="text-muted"><?= date('h:i A', strtotime($row['returned_at'])) ?></small>
+                                            <?php endif; ?>
                                         </td>
                                         <td style="width: 10%;">
                                             <?php
@@ -1150,13 +1253,57 @@ include __DIR__ . '/_header.php';
                                 </tbody>
                             </table>
                         </div>
+                        
+                        <!-- Pagination -->
+                        <?php if ($totalPages > 1): ?>
+                        <div class="pagination-container">
+                            <nav aria-label="Page navigation">
+                                <ul class="pagination">
+                                    <?php if ($current_page > 1): ?>
+                                        <li class="page-item">
+                                            <a class="page-link" 
+                                               href="?filter=returned&page=<?= $current_page - 1 ?>&student_id=<?= $student_id ?>&status=<?= $status_filter ?>">
+                                                <i class="fas fa-chevron-left"></i> Previous
+                                            </a>
+                                        </li>
+                                    <?php endif; ?>
+                                    
+                                    <?php 
+                                    $startPage = max(1, $current_page - 2);
+                                    $endPage = min($totalPages, $current_page + 2);
+                                    
+                                    for ($i = $startPage; $i <= $endPage; $i++): 
+                                    ?>
+                                        <li class="page-item <?= $i == $current_page ? 'active' : '' ?>">
+                                            <a class="page-link" 
+                                               href="?filter=returned&page=<?= $i ?>&student_id=<?= $student_id ?>&status=<?= $status_filter ?>">
+                                                <?= $i ?>
+                                            </a>
+                                        </li>
+                                    <?php endfor; ?>
+                                    
+                                    <?php if ($current_page < $totalPages): ?>
+                                        <li class="page-item">
+                                            <a class="page-link" 
+                                               href="?filter=returned&page=<?= $current_page + 1 ?>&student_id=<?= $student_id ?>&status=<?= $status_filter ?>">
+                                                Next <i class="fas fa-chevron-right"></i>
+                                            </a>
+                                        </li>
+                                    <?php endif; ?>
+                                </ul>
+                            </nav>
+                            <div class="page-info">
+                                Page <?= $current_page ?> of <?= $totalPages ?> (Total: <?= $totalCount ?> items)
+                            </div>
+                        </div>
+                        <?php endif; ?>
                     <?php endif; ?>
                 </div>
             </div>
         </div>
 
         <!-- Overdue Books Tab -->
-        <div id="overdue-tab" class="tab-content">
+        <div id="overdue-tab" class="tab-content <?= $activeTab === 'overdue' ? 'active' : '' ?>">
             <div class="card">
                 <div class="card-header d-flex justify-content-between align-items-center">
                     <div>
@@ -1164,20 +1311,15 @@ include __DIR__ . '/_header.php';
                     </div>
                     <div>
                         <?php 
-                        $overdueCount = count(array_filter($issued, function($item) {
+                        $overdueBooks = array_filter($issued, function($item) {
                             return $item['status'] === 'overdue';
-                        }));
+                        });
+                        $overdueCount = count($overdueBooks);
                         ?>
                         <span class="badge bg-danger rounded-pill px-3 py-2">Overdue: <?= $overdueCount ?></span>
                     </div>
                 </div>
                 <div class="card-body">
-                    <?php 
-                    $overdueBooks = array_filter($issued, function($item) {
-                        return $item['status'] === 'overdue';
-                    });
-                    ?>
-                    
                     <?php if (empty($overdueBooks)): ?>
                         <div class="empty-state">
                             <i class="fas fa-check-circle fa-4x mb-4 text-success"></i>
@@ -1241,6 +1383,50 @@ include __DIR__ . '/_header.php';
                             </div>
                             <?php endforeach; ?>
                         </div>
+                        
+                        <!-- Pagination -->
+                        <?php if ($totalPages > 1): ?>
+                        <div class="pagination-container">
+                            <nav aria-label="Page navigation">
+                                <ul class="pagination">
+                                    <?php if ($current_page > 1): ?>
+                                        <li class="page-item">
+                                            <a class="page-link" 
+                                               href="?filter=overdue&page=<?= $current_page - 1 ?>&student_id=<?= $student_id ?>&status=<?= $status_filter ?>">
+                                                <i class="fas fa-chevron-left"></i> Previous
+                                            </a>
+                                        </li>
+                                    <?php endif; ?>
+                                    
+                                    <?php 
+                                    $startPage = max(1, $current_page - 2);
+                                    $endPage = min($totalPages, $current_page + 2);
+                                    
+                                    for ($i = $startPage; $i <= $endPage; $i++): 
+                                    ?>
+                                        <li class="page-item <?= $i == $current_page ? 'active' : '' ?>">
+                                            <a class="page-link" 
+                                               href="?filter=overdue&page=<?= $i ?>&student_id=<?= $student_id ?>&status=<?= $status_filter ?>">
+                                                <?= $i ?>
+                                            </a>
+                                        </li>
+                                    <?php endfor; ?>
+                                    
+                                    <?php if ($current_page < $totalPages): ?>
+                                        <li class="page-item">
+                                            <a class="page-link" 
+                                               href="?filter=overdue&page=<?= $current_page + 1 ?>&student_id=<?= $student_id ?>&status=<?= $status_filter ?>">
+                                                Next <i class="fas fa-chevron-right"></i>
+                                            </a>
+                                        </li>
+                                    <?php endif; ?>
+                                </ul>
+                            </nav>
+                            <div class="page-info">
+                                Page <?= $current_page ?> of <?= $totalPages ?> (Total: <?= $totalCount ?> items)
+                            </div>
+                        </div>
+                        <?php endif; ?>
                     <?php endif; ?>
                 </div>
             </div>
@@ -1283,41 +1469,43 @@ include __DIR__ . '/_header.php';
     const overdueFeePerDay = 30;
 
     function switchTab(tabName) {
-        // Hide all tabs
-        document.querySelectorAll('.tab-content').forEach(tab => {
-            tab.classList.remove('active');
-        });
-        
-        // Remove active class from all buttons
-        document.querySelectorAll('.tab-btn').forEach(btn => {
-            btn.classList.remove('active');
-        });
-        
-        // Show selected tab
-        document.getElementById(tabName + '-tab').classList.add('active');
-        
-        // Set active button
-        event.target.classList.add('active');
-        
-        // Update URL without page reload
-        const url = new URL(window.location);
-        url.searchParams.set('filter', tabName === 'active' ? 'all' : tabName);
-        window.history.replaceState({}, '', url);
+        // Update URL and reload with the tab filter
+        let url = new URL(window.location);
+        url.searchParams.set('filter', tabName);
+        url.searchParams.delete('page'); // Reset to page 1 when switching tabs
+        window.location.href = url.toString();
     }
 
     function applyFilters() {
         const studentId = document.getElementById('student_id').value;
         const statusFilter = document.getElementById('status_filter').value;
+        const currentFilter = '<?= $filter ?>';
         
-        let url = 'issued_books.php?';
-        if (studentId) url += `student_id=${encodeURIComponent(studentId)}&`;
-        if (statusFilter) url += `status=${encodeURIComponent(statusFilter)}&`;
+        let url = new URL(window.location);
+        url.searchParams.set('filter', currentFilter);
+        url.searchParams.delete('page'); // Reset to page 1 when applying filters
         
-        window.location.href = url;
+        if (studentId) {
+            url.searchParams.set('student_id', studentId);
+        } else {
+            url.searchParams.delete('student_id');
+        }
+        
+        if (statusFilter) {
+            url.searchParams.set('status', statusFilter);
+        } else {
+            url.searchParams.delete('status');
+        }
+        
+        window.location.href = url.toString();
     }
 
     function clearFilters() {
-        window.location.href = 'issued_books.php';
+        let url = new URL(window.location);
+        url.searchParams.delete('student_id');
+        url.searchParams.delete('status');
+        url.searchParams.delete('page');
+        window.location.href = url.toString();
     }
 
     function showReturnModal(borrowId) {
@@ -1400,9 +1588,9 @@ include __DIR__ . '/_header.php';
                             <select id="returnCondition" class="form-control" onchange="updateCopyStatus()">
                                 <option value="good">Good - No damage</option>
                                 <option value="fair">Fair - Minor wear</option>
-                                <option value="poor">Poor - Significant wear</option>
-                                <option value="damaged">Damaged - Needs repair</option>
-                                <option value="lost">Lost - Book is lost</option>
+                                <option value="poor">Poor - Significant wear (still available)</option>
+                                <option value="damaged">Damaged - Needs repair (not available)</option>
+                                <option value="lost">Lost - Book is lost (not available)</option>
                             </select>
                         </div>
                         
@@ -1477,30 +1665,42 @@ include __DIR__ . '/_header.php';
         const returnCondition = document.getElementById('returnCondition').value;
         let statusText = 'available';
         let statusClass = 'alert-info';
+        let statusIcon = 'fas fa-check-circle';
         
         switch(returnCondition) {
             case 'good':
+                statusText = 'available';
+                statusClass = 'alert-success';
+                statusIcon = 'fas fa-check-circle';
+                break;
             case 'fair':
                 statusText = 'available';
                 statusClass = 'alert-success';
+                statusIcon = 'fas fa-check-circle';
                 break;
             case 'poor':
                 statusText = 'available (needs maintenance)';
                 statusClass = 'alert-warning';
+                statusIcon = 'fas fa-exclamation-triangle';
                 break;
             case 'damaged':
-                statusText = 'damaged';
+                statusText = 'damaged (not available for borrowing)';
                 statusClass = 'alert-warning';
+                statusIcon = 'fas fa-exclamation-triangle';
                 break;
             case 'lost':
-                statusText = 'lost';
+                statusText = 'lost (book will be removed from inventory)';
                 statusClass = 'alert-danger';
+                statusIcon = 'fas fa-times-circle';
                 break;
         }
         
         const statusInfo = document.getElementById('copyStatusInfo');
         statusInfo.className = `alert ${statusClass}`;
-        document.getElementById('statusText').textContent = statusText;
+        statusInfo.innerHTML = `
+            <i class="${statusIcon} me-2"></i>
+            Book copy will be marked as <strong>${statusText}</strong> after return.
+        `;
     }
 
     function processReturn() {
@@ -1845,13 +2045,6 @@ include __DIR__ . '/_header.php';
             }
         `;
         document.head.appendChild(style);
-        
-        // Check URL for tab parameter
-        const urlParams = new URLSearchParams(window.location.search);
-        const filter = urlParams.get('filter');
-        if (filter && ['overdue', 'returned'].includes(filter)) {
-            switchTab(filter);
-        }
     });
 
     // Keyboard shortcuts
@@ -1861,10 +2054,7 @@ include __DIR__ . '/_header.php';
         }
         if (e.key === 'r' && e.ctrlKey) {
             e.preventDefault();
-            const activeBtn = document.querySelector('.tab-btn.active');
-            if (activeBtn && activeBtn.textContent.includes('Active')) {
-                location.reload();
-            }
+            location.reload();
         }
     });
     </script>
