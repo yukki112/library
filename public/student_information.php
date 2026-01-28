@@ -122,15 +122,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 break;
                 
             case 'borrow_book':
-                if (!empty($_POST['library_id']) && !empty($_POST['copy_number'])) {
+                if (!empty($_POST['library_id']) && !empty($_POST['copy_number']) && isset($_POST['borrow_days'])) {
                     $library_id = trim($_POST['library_id']);
                     $copy_number = trim($_POST['copy_number']);
+                    $borrow_days = intval($_POST['borrow_days']);
+                    
+                    // Validate borrow days
+                    if ($borrow_days < 1 || $borrow_days > 7) {
+                        $borrow_error = "❌ Borrow period must be between 1 and 7 days!";
+                        break;
+                    }
                     
                     try {
                         $pdo->beginTransaction();
                         
                         // Get patron info
-                        $stmt = $pdo->prepare("SELECT id, name FROM patrons WHERE library_id = ?");
+                        $stmt = $pdo->prepare("SELECT id, name, department, semester FROM patrons WHERE library_id = ?");
                         $stmt->execute([$library_id]);
                         $patron = $stmt->fetch();
                         
@@ -140,7 +147,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         
                         // Get book copy info with cover image
                         $stmt = $pdo->prepare("
-                            SELECT bc.*, b.title, b.author, b.isbn, b.cover_image, b.cover_image_cache, b.category_id 
+                            SELECT bc.*, b.title, b.author, b.isbn, b.cover_image, b.cover_image_cache, b.category_id, 
+                                   b.description, b.publisher, b.year_published, b.category
                             FROM book_copies bc
                             JOIN books b ON bc.book_id = b.id
                             WHERE bc.copy_number = ? AND bc.is_active = 1
@@ -158,6 +166,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             throw new Exception("⚠️ This book copy is currently <strong>{$status_text}</strong>!");
                         }
                         
+                        // ADDITIONAL CHECK: Check if this specific copy is already borrowed
+                        $stmt = $pdo->prepare("
+                            SELECT COUNT(*) as already_borrowed 
+                            FROM borrow_logs 
+                            WHERE book_copy_id = ? AND status IN ('borrowed', 'overdue')
+                        ");
+                        $stmt->execute([$book_copy['id']]);
+                        $already_borrowed = $stmt->fetch()['already_borrowed'];
+                        
+                        if ($already_borrowed > 0) {
+                            throw new Exception("⚠️ This specific book copy is already borrowed by another student!");
+                        }
+                        
                         // Check if student is in library
                         $stmt = $pdo->prepare("SELECT id FROM library_attendance WHERE patron_id = ? AND status = 'in_library'");
                         $stmt->execute([$patron['id']]);
@@ -167,8 +188,43 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             throw new Exception("⚠️ Student must be in the library to borrow books!");
                         }
                         
-                        // Calculate dates using settings_get function
-                        $borrow_days = settings_get('borrow_period_days', 14);
+                        // Check if student has overdue books
+                        $stmt = $pdo->prepare("SELECT COUNT(*) as overdue_count FROM borrow_logs WHERE patron_id = ? AND status = 'overdue'");
+                        $stmt->execute([$patron['id']]);
+                        $overdue_count = $stmt->fetch()['overdue_count'];
+                        
+                        if ($overdue_count > 0) {
+                            throw new Exception("⚠️ Student has {$overdue_count} overdue book(s). Clear dues first!");
+                        }
+                        
+                        // Check borrowing limit
+                        $stmt = $pdo->prepare("SELECT COUNT(*) as active_borrows FROM borrow_logs WHERE patron_id = ? AND status IN ('borrowed', 'overdue')");
+                        $stmt->execute([$patron['id']]);
+                        $active_borrows = $stmt->fetch()['active_borrows'];
+                        $max_borrows = 5; // Maximum books a student can borrow
+                        
+                        if ($active_borrows >= $max_borrows) {
+                            throw new Exception("⚠️ Student has reached the maximum borrowing limit ({$max_borrows} books)!");
+                        }
+                        
+                        // Check if student already has this specific book (same book_id) borrowed
+                        // This prevents borrowing multiple copies of the same book
+                        $stmt = $pdo->prepare("
+                            SELECT COUNT(*) as same_book_count 
+                            FROM borrow_logs bl
+                            JOIN book_copies bc ON bl.book_copy_id = bc.id
+                            WHERE bl.patron_id = ? 
+                            AND bl.status IN ('borrowed', 'overdue')
+                            AND bc.book_id = ?
+                        ");
+                        $stmt->execute([$patron['id'], $book_copy['book_id']]);
+                        $same_book_count = $stmt->fetch()['same_book_count'];
+                        
+                        if ($same_book_count > 0) {
+                            throw new Exception("⚠️ Student already has a copy of this book borrowed!");
+                        }
+                        
+                        // Calculate dates
                         $borrowed_at = date('Y-m-d H:i:s');
                         $due_date = date('Y-m-d H:i:s', strtotime("+{$borrow_days} days"));
                         
@@ -178,7 +234,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             (book_id, book_copy_id, patron_id, borrowed_at, due_date, status, notes)
                             VALUES (?, ?, ?, ?, ?, 'borrowed', ?)
                         ");
-                        $notes = "Borrowed in-library. Student: " . $patron['name'];
+                        $notes = "Borrowed in-library for {$borrow_days} days. Student: " . $patron['name'] . " (Library ID: {$library_id})";
                         $stmt->execute([
                             $book_copy['book_id'],
                             $book_copy['id'],
@@ -210,45 +266,95 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $stmt->execute([
                             $book_copy['id'],
                             $patron['id'],
-                            "Borrowed in-library by patron #{$patron['id']} (Library ID: {$library_id})"
+                            "Borrowed in-library for {$borrow_days} days by patron #{$patron['id']} (Library ID: {$library_id})"
                         ]);
+                        
+                        // Create notification for student
+                        $stmt = $pdo->prepare("
+                            INSERT INTO notifications (user_id, type, message, meta)
+                            SELECT u.id, 'borrow_created', ?, ?
+                            FROM users u WHERE u.patron_id = ?
+                        ");
+                        $message = "You borrowed '{$book_copy['title']}' (Copy: {$book_copy['copy_number']}) for {$borrow_days} days";
+                        $meta = json_encode([
+                            'borrow_log_id' => $borrow_id,
+                            'book_id' => $book_copy['book_id'],
+                            'book_copy_id' => $book_copy['id'],
+                            'due_date' => $due_date
+                        ]);
+                        $stmt->execute([$message, $meta, $patron['id']]);
                         
                         // Audit and notifications
                         audit('create', 'borrow_logs', $borrow_id, [
                             'patron_id' => $patron['id'],
                             'book_copy_id' => $book_copy['id'],
-                            'library_id' => $library_id
+                            'library_id' => $library_id,
+                            'borrow_days' => $borrow_days
                         ]);
                         
                         $pdo->commit();
                         
-                        // Get book cover image
-                        $cover_image = !empty($book_copy['cover_image_cache']) 
-                            ? "../uploads/covers/" . $book_copy['cover_image_cache']
-                            : (!empty($book_copy['cover_image']) 
-                                ? "../uploads/covers/" . $book_copy['cover_image']
-                                : $default_cover);
+                        // Get book cover image - check both cover_image and cover_image_cache
+                        $cover_image = $default_cover;
+                        if (!empty($book_copy['cover_image_cache']) && $book_copy['cover_image_cache'] !== 'null') {
+                            $cover_path = "../uploads/covers/" . $book_copy['cover_image_cache'];
+                            if (file_exists($cover_path)) {
+                                $cover_image = $cover_path;
+                            }
+                        } elseif (!empty($book_copy['cover_image']) && $book_copy['cover_image'] !== 'null') {
+                            $cover_path = "../uploads/covers/" . $book_copy['cover_image'];
+                            if (file_exists($cover_path)) {
+                                $cover_image = $cover_path;
+                            }
+                        }
+                        
+                        // Get current location if available
+                        $location = '';
+                        if ($book_copy['current_section']) {
+                            $location = "{$book_copy['current_section']}-S{$book_copy['current_shelf']}-R{$book_copy['current_row']}-P{$book_copy['current_slot']}";
+                        }
                         
                         $borrow_success = [
                             'title' => "✅ Book Borrowed Successfully!",
-                            'message' => "<strong>{$book_copy['title']}</strong> has been borrowed by <strong>{$patron['name']}</strong>",
+                            'message' => "<strong>{$book_copy['title']}</strong> has been borrowed by <strong>{$patron['name']}</strong> for <strong>{$borrow_days} days</strong>",
                             'details' => [
                                 'Copy Number' => $book_copy['copy_number'],
                                 'Book Title' => $book_copy['title'],
                                 'Author' => $book_copy['author'],
+                                'ISBN' => $book_copy['isbn'] ?? 'N/A',
+                                'Category' => $book_copy['category'] ?? 'N/A',
+                                'Publisher' => $book_copy['publisher'] ?? 'N/A',
+                                'Year' => $book_copy['year_published'] ?? 'N/A',
                                 'Borrowed Date' => date('F j, Y g:i A', strtotime($borrowed_at)),
                                 'Due Date' => date('F j, Y g:i A', strtotime($due_date)),
+                                'Borrow Period' => "{$borrow_days} days",
                                 'Book Condition' => ucfirst($book_copy['book_condition']),
+                                'Location' => $location ?: 'Not specified',
                                 'Library ID' => $library_id,
-                                'Student Name' => $patron['name']
+                                'Student Name' => $patron['name'],
+                                'Department' => $patron['department'] ?? 'N/A',
+                                'Semester' => $patron['semester'] ?? 'N/A'
                             ],
                             'cover_image' => $cover_image
                         ];
                         
+                    } catch (PDOException $e) {
+                        $pdo->rollBack();
+                        
+                        // Check for specific SQL errors
+                        if (strpos($e->getMessage(), 'This specific book copy is already borrowed') !== false) {
+                            $borrow_error = "⚠️ This specific book copy is already borrowed by another student!";
+                        } elseif (strpos($e->getMessage(), 'Duplicate entry') !== false) {
+                            $borrow_error = "⚠️ Student already has this book borrowed!";
+                        } else {
+                            $borrow_error = "❌ Database error: " . $e->getMessage();
+                        }
                     } catch (Exception $e) {
                         $pdo->rollBack();
                         $borrow_error = $e->getMessage();
                     }
+                } else {
+                    $borrow_error = "❌ Please fill all required fields!";
                 }
                 break;
         }
@@ -300,9 +406,9 @@ if (!empty($students_in_library)) {
     $avg_time = sprintf('%02d:%02d:%02d', $avg_hours, $avg_minutes, $avg_seconds);
 }
 
-// Get attendance history with pagination
+// Get attendance history with pagination (5 records per page)
 $page = isset($_GET['page']) ? max(1, intval($_GET['page'])) : 1;
-$limit = 20;
+$limit = 5; // Changed from 20 to 5
 $offset = ($page - 1) * $limit;
 
 // Get filter parameters for history
@@ -395,7 +501,7 @@ include __DIR__ . '/_header.php';
 <!-- Borrow Success Modal -->
 <?php if (isset($borrow_success)): ?>
 <div id="borrowSuccessModal" style="display:flex; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.7); align-items:center; justify-content:center; z-index:9999;">
-    <div style="background:linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%); padding:30px; border-radius:15px; width:600px; max-width:90%; max-height:90vh; overflow-y:auto; box-shadow:0 20px 60px rgba(0,0,0,0.3); border:2px solid #10b981;">
+    <div style="background:linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%); padding:30px; border-radius:15px; width:700px; max-width:90%; max-height:90vh; overflow-y:auto; box-shadow:0 20px 60px rgba(0,0,0,0.3); border:2px solid #10b981;">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:25px;">
             <div style="display:flex; align-items:center; gap:10px;">
                 <div style="background:#10b981; width:40px; height:40px; border-radius:50%; display:flex; align-items:center; justify-content:center;">
@@ -453,7 +559,9 @@ include __DIR__ . '/_header.php';
     function closeSuccessModalAndClear() {
         document.getElementById('borrowSuccessModal').style.display = 'none';
         document.getElementById('copy_number').value = '';
+        document.getElementById('borrow_days').value = '7';
         document.getElementById('bookPreview').style.display = 'none';
+        document.getElementById('studentPreview').style.display = 'none';
     }
     
     function printReceipt() {
@@ -539,9 +647,9 @@ include __DIR__ . '/_header.php';
     <div style="background:linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); color:white; padding:20px; border-radius:12px; box-shadow:0 4px 6px rgba(0,0,0,0.1);">
         <div style="display:flex; justify-content:space-between; align-items:center;">
             <div>
-                <div style="font-size:14px; opacity:0.9;">Borrow Period</div>
-                <div style="font-size:36px; font-weight:bold; margin:5px 0;"><?= settings_get('borrow_period_days', 14) ?>d</div>
-                <div style="font-size:12px; opacity:0.8;">Days allowed</div>
+                <div style="font-size:14px; opacity:0.9;">Max Borrow Days</div>
+                <div style="font-size:36px; font-weight:bold; margin:5px 0;">7d</div>
+                <div style="font-size:12px; opacity:0.8;">Maximum allowed</div>
             </div>
             <div style="background:rgba(255,255,255,0.2); width:50px; height:50px; border-radius:50%; display:flex; align-items:center; justify-content:center;">
                 <i class="fa fa-calendar" style="font-size:24px;"></i>
@@ -606,23 +714,12 @@ include __DIR__ . '/_header.php';
                     <i class="fa fa-book" style="font-size:18px;"></i>
                     Borrow Book
                 </h4>
-                <form method="POST" id="borrowForm" style="display:grid; grid-template-columns:1fr 1fr auto; gap:15px; align-items:end;">
-                    <div>
-                        <label style="display:block; margin-bottom:8px; font-size:14px; color:#047857; font-weight:500;">
-                            <i class="fa fa-id-card"></i> Student Library ID
-                        </label>
-                        <input type="hidden" name="action" value="borrow_book">
-                        <input type="text" name="library_id" id="borrow_library_id" placeholder="e.g., 22121773" required 
-                               style="width:100%; padding:12px; border:2px solid #cbd5e1; border-radius:8px; font-size:16px; transition:all 0.3s;"
-                               onfocus="this.style.borderColor='#10b981'; this.style.boxShadow='0 0 0 3px rgba(16, 185, 129, 0.1)'"
-                               onblur="this.style.borderColor='#cbd5e1'; this.style.boxShadow='none'">
-                    </div>
-                    
+                <form method="POST" id="borrowForm" style="display:grid; grid-template-columns:1fr 1fr 1fr auto; gap:15px; align-items:end;">
                     <div>
                         <label style="display:block; margin-bottom:8px; font-size:14px; color:#047857; font-weight:500;">
                             <i class="fa fa-barcode"></i> Book Copy Number
                         </label>
-                        <input type="text" name="copy_number" id="copy_number" placeholder="e.g., DAN001" required 
+                        <input type="text" name="copy_number" id="copy_number" placeholder="e.g., PSYM003" required 
                                style="width:100%; padding:12px; border:2px solid #cbd5e1; border-radius:8px; font-size:16px; transition:all 0.3s;"
                                onfocus="this.style.borderColor='#10b981'; this.style.boxShadow='0 0 0 3px rgba(16, 185, 129, 0.1)'"
                                onblur="this.style.borderColor='#cbd5e1'; this.style.boxShadow='none'"
@@ -630,7 +727,37 @@ include __DIR__ . '/_header.php';
                     </div>
                     
                     <div>
-                        <button type="submit" class="btn" 
+                        <label style="display:block; margin-bottom:8px; font-size:14px; color:#047857; font-weight:500;">
+                            <i class="fa fa-id-card"></i> Student Library ID
+                        </label>
+                        <input type="hidden" name="action" value="borrow_book">
+                        <input type="text" name="library_id" id="borrow_library_id" placeholder="e.g., 123123123" required 
+                               style="width:100%; padding:12px; border:2px solid #cbd5e1; border-radius:8px; font-size:16px; transition:all 0.3s;"
+                               onfocus="this.style.borderColor='#10b981'; this.style.boxShadow='0 0 0 3px rgba(16, 185, 129, 0.1)'"
+                               onblur="this.style.borderColor='#cbd5e1'; this.style.boxShadow='none'"
+                               oninput="checkStudent(this.value)">
+                    </div>
+                    
+                    <div>
+                        <label style="display:block; margin-bottom:8px; font-size:14px; color:#047857; font-weight:500;">
+                            <i class="fa fa-calendar"></i> Days to Borrow
+                        </label>
+                        <select name="borrow_days" id="borrow_days" required 
+                                style="width:100%; padding:12px; border:2px solid #cbd5e1; border-radius:8px; font-size:16px; transition:all 0.3s;"
+                                onfocus="this.style.borderColor='#10b981'; this.style.boxShadow='0 0 0 3px rgba(16, 185, 129, 0.1)'"
+                                onblur="this.style.borderColor='#cbd5e1'; this.style.boxShadow='none'">
+                            <option value="1">1 day</option>
+                            <option value="2">2 days</option>
+                            <option value="3">3 days</option>
+                            <option value="4">4 days</option>
+                            <option value="5">5 days</option>
+                            <option value="6">6 days</option>
+                            <option value="7" selected>7 days</option>
+                        </select>
+                    </div>
+                    
+                    <div>
+                        <button type="submit" class="btn" id="borrowBtn"
                                 style="background:linear-gradient(135deg, #10b981 0%, #047857 100%); color:white; padding:12px 30px; border-radius:8px; border:none; cursor:pointer; font-weight:500; height:46px; display:flex; align-items:center; gap:8px; transition:all 0.3s;"
                                 onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 6px 12px rgba(16, 185, 129, 0.3)'"
                                 onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='none'">
@@ -639,10 +766,21 @@ include __DIR__ . '/_header.php';
                     </div>
                 </form>
                 
-                <div id="bookPreview" style="margin-top:20px; display:none; animation:fadeIn 0.5s;">
+                <!-- Student Information Preview -->
+                <div id="studentPreview" style="margin-top:15px; display:none; animation:fadeIn 0.5s;">
                     <div style="background:white; padding:15px; border-radius:10px; border:2px solid #d1fae5; box-shadow:0 2px 8px rgba(0,0,0,0.05);">
                         <h5 style="margin:0 0 10px 0; color:#065f46; display:flex; align-items:center; gap:8px;">
-                            <i class="fa fa-search"></i> Book Details Preview
+                            <i class="fa fa-user"></i> Student Information
+                        </h5>
+                        <div id="studentDetails"></div>
+                    </div>
+                </div>
+                
+                <!-- Book Information Preview -->
+                <div id="bookPreview" style="margin-top:15px; display:none; animation:fadeIn 0.5s;">
+                    <div style="background:white; padding:15px; border-radius:10px; border:2px solid #d1fae5; box-shadow:0 2px 8px rgba(0,0,0,0.05);">
+                        <h5 style="margin:0 0 10px 0; color:#065f46; display:flex; align-items:center; gap:8px;">
+                            <i class="fa fa-search"></i> Book Details
                         </h5>
                         <div id="bookDetails"></div>
                     </div>
@@ -777,7 +915,7 @@ include __DIR__ . '/_header.php';
                                             <i class="fa fa-sign-out"></i> Exit
                                         </button>
                                     </form>
-                                    <button onclick="document.getElementById('borrow_library_id').value='<?= htmlspecialchars($student['library_id']) ?>'; document.getElementById('borrow_library_id').focus();" 
+                                    <button onclick="selectStudentForBorrow('<?= htmlspecialchars($student['library_id']) ?>', '<?= htmlspecialchars($student['name']) ?>')" 
                                             class="btn btn-sm" 
                                             style="background:linear-gradient(135deg, #10b981 0%, #047857 100%); color:white; padding:6px 12px; border-radius:6px; border:none; cursor:pointer; font-size:12px; font-weight:500; display:flex; align-items:center; gap:4px; transition:all 0.3s;"
                                             onmouseover="this.style.transform='translateY(-1px)'"
@@ -954,70 +1092,226 @@ include __DIR__ . '/_header.php';
                 </table>
             </div>
             
-            <!-- Pagination -->
-            <?php if ($total_pages > 1): ?>
-            <div style="display:flex; justify-content:center; align-items:center; gap:12px; margin-top:30px; padding-top:25px; border-top:2px solid #e5e7eb;">
+            <!-- Simple Next/Previous Pagination -->
+            <div style="display:flex; justify-content:center; align-items:center; gap:15px; margin-top:30px; padding-top:25px; border-top:2px solid #e5e7eb;">
                 <?php if ($page > 1): ?>
-                    <a href="?page=1<?= $filter_library_id ? '&filter_library_id=' . urlencode($filter_library_id) : '' ?><?= $filter_date ? '&filter_date=' . urlencode($filter_date) : '' ?><?= $filter_status ? '&filter_status=' . urlencode($filter_status) : '' ?><?= $current_filter_name ? '&current_filter_name=' . urlencode($current_filter_name) : '' ?><?= $current_filter_library_id ? '&current_filter_library_id=' . urlencode($current_filter_library_id) : '' ?>" 
-                       class="btn" 
-                       style="background:#f3f4f6; color:#374151; padding:8px 12px; border-radius:6px; text-decoration:none; display:inline-flex; align-items:center; gap:6px; transition:all 0.3s;"
-                       onmouseover="this.style.background='#e5e7eb'"
-                       onmouseout="this.style.background='#f3f4f6'">
-                        <i class="fa fa-angle-double-left"></i> First
-                    </a>
                     <a href="?page=<?= $page - 1 ?><?= $filter_library_id ? '&filter_library_id=' . urlencode($filter_library_id) : '' ?><?= $filter_date ? '&filter_date=' . urlencode($filter_date) : '' ?><?= $filter_status ? '&filter_status=' . urlencode($filter_status) : '' ?><?= $current_filter_name ? '&current_filter_name=' . urlencode($current_filter_name) : '' ?><?= $current_filter_library_id ? '&current_filter_library_id=' . urlencode($current_filter_library_id) : '' ?>" 
                        class="btn" 
-                       style="background:#f3f4f6; color:#374151; padding:8px 12px; border-radius:6px; text-decoration:none; display:inline-flex; align-items:center; gap:6px; transition:all 0.3s;"
-                       onmouseover="this.style.background='#e5e7eb'"
-                       onmouseout="this.style.background='#f3f4f6'">
-                        <i class="fa fa-angle-left"></i> Prev
+                       style="background:linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); color:white; padding:10px 20px; border-radius:8px; text-decoration:none; display:inline-flex; align-items:center; gap:8px; transition:all 0.3s;"
+                       onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 6px 12px rgba(139, 92, 246, 0.3)'"
+                       onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='none'">
+                        <i class="fa fa-angle-left"></i> Previous
                     </a>
                 <?php endif; ?>
                 
-                <div style="display:flex; gap:6px; align-items:center;">
-                    <?php 
-                    $start_page = max(1, $page - 2);
-                    $end_page = min($total_pages, $page + 2);
-                    
-                    for ($p = $start_page; $p <= $end_page; $p++): 
-                    ?>
-                        <a href="?page=<?= $p ?><?= $filter_library_id ? '&filter_library_id=' . urlencode($filter_library_id) : '' ?><?= $filter_date ? '&filter_date=' . urlencode($filter_date) : '' ?><?= $filter_status ? '&filter_status=' . urlencode($filter_status) : '' ?><?= $current_filter_name ? '&current_filter_name=' . urlencode($current_filter_name) : '' ?><?= $current_filter_library_id ? '&current_filter_library_id=' . urlencode($current_filter_library_id) : '' ?>" 
-                           class="btn" 
-                           style="<?= $p == $page ? 'background:#8b5cf6; color:white;' : 'background:#f3f4f6; color:#374151;' ?> padding:8px 12px; border-radius:6px; text-decoration:none; min-width:36px; display:inline-flex; align-items:center; justify-content:center; transition:all 0.3s;"
-                           onmouseover="<?= $p != $page ? 'this.style.background=\'#e5e7eb\'' : '' ?>"
-                           onmouseout="<?= $p != $page ? 'this.style.background=\'#f3f4f6\'' : '' ?>">
-                            <?= $p ?>
-                        </a>
-                    <?php endfor; ?>
+                <div style="font-size:14px; color:#6b7280; padding:8px 16px; background:#f8fafc; border-radius:8px; border:1px solid #e5e7eb;">
+                    Showing <?= min($limit, count($attendance_history)) ?> of <?= $total_count ?> records
+                    <span style="color:#8b5cf6; font-weight:600;">(Page <?= $page ?> of <?= $total_pages ?>)</span>
                 </div>
                 
                 <?php if ($page < $total_pages): ?>
                     <a href="?page=<?= $page + 1 ?><?= $filter_library_id ? '&filter_library_id=' . urlencode($filter_library_id) : '' ?><?= $filter_date ? '&filter_date=' . urlencode($filter_date) : '' ?><?= $filter_status ? '&filter_status=' . urlencode($filter_status) : '' ?><?= $current_filter_name ? '&current_filter_name=' . urlencode($current_filter_name) : '' ?><?= $current_filter_library_id ? '&current_filter_library_id=' . urlencode($current_filter_library_id) : '' ?>" 
                        class="btn" 
-                       style="background:#f3f4f6; color:#374151; padding:8px 12px; border-radius:6px; text-decoration:none; display:inline-flex; align-items:center; gap:6px; transition:all 0.3s;"
-                       onmouseover="this.style.background='#e5e7eb'"
-                       onmouseout="this.style.background='#f3f4f6'">
+                       style="background:linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); color:white; padding:10px 20px; border-radius:8px; text-decoration:none; display:inline-flex; align-items:center; gap:8px; transition:all 0.3s;"
+                       onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 6px 12px rgba(139, 92, 246, 0.3)'"
+                       onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='none'">
                         Next <i class="fa fa-angle-right"></i>
-                    </a>
-                    <a href="?page=<?= $total_pages ?><?= $filter_library_id ? '&filter_library_id=' . urlencode($filter_library_id) : '' ?><?= $filter_date ? '&filter_date=' . urlencode($filter_date) : '' ?><?= $filter_status ? '&filter_status=' . urlencode($filter_status) : '' ?><?= $current_filter_name ? '&current_filter_name=' . urlencode($current_filter_name) : '' ?><?= $current_filter_library_id ? '&current_filter_library_id=' . urlencode($current_filter_library_id) : '' ?>" 
-                       class="btn" 
-                       style="background:#f3f4f6; color:#374151; padding:8px 12px; border-radius:6px; text-decoration:none; display:inline-flex; align-items:center; gap:6px; transition:all 0.3s;"
-                       onmouseover="this.style.background='#e5e7eb'"
-                       onmouseout="this.style.background='#f3f4f6'">
-                        Last <i class="fa fa-angle-double-right"></i>
                     </a>
                 <?php endif; ?>
             </div>
-            <?php endif; ?>
+            
+            <!-- Page Navigation -->
+            <div style="display:flex; justify-content:center; align-items:center; gap:8px; margin-top:15px; flex-wrap:wrap;">
+                <?php for ($p = 1; $p <= $total_pages; $p++): ?>
+                    <?php if ($p == $page): ?>
+                        <span style="background:#8b5cf6; color:white; padding:6px 12px; border-radius:6px; font-size:14px; font-weight:600;">
+                            <?= $p ?>
+                        </span>
+                    <?php else: ?>
+                        <a href="?page=<?= $p ?><?= $filter_library_id ? '&filter_library_id=' . urlencode($filter_library_id) : '' ?><?= $filter_date ? '&filter_date=' . urlencode($filter_date) : '' ?><?= $filter_status ? '&filter_status=' . urlencode($filter_status) : '' ?><?= $current_filter_name ? '&current_filter_name=' . urlencode($current_filter_name) : '' ?><?= $current_filter_library_id ? '&current_filter_library_id=' . urlencode($current_filter_library_id) : '' ?>" 
+                           style="background:#f3f4f6; color:#374151; padding:6px 12px; border-radius:6px; text-decoration:none; font-size:14px; transition:all 0.3s;"
+                           onmouseover="this.style.background='#e5e7eb'; this.style.color='#1f2937'">
+                            <?= $p ?>
+                        </a>
+                    <?php endif; ?>
+                <?php endfor; ?>
+            </div>
         <?php endif; ?>
     </div>
 </div>
 
 <script>
-// Book copy validation and preview
+// Function to select student from the table for borrowing
+function selectStudentForBorrow(libraryId, studentName) {
+    document.getElementById('borrow_library_id').value = libraryId;
+    checkStudent(libraryId);
+    document.getElementById('copy_number').focus();
+    
+    // Show a quick notification
+    const notification = document.createElement('div');
+    notification.innerHTML = `
+        <div style="position:fixed; top:20px; right:20px; background:#10b981; color:white; padding:12px 20px; border-radius:8px; box-shadow:0 4px 6px rgba(0,0,0,0.1); z-index:10000; animation:slideIn 0.3s;">
+            <i class="fa fa-check-circle"></i> Selected student: ${studentName}
+        </div>
+    `;
+    document.body.appendChild(notification);
+    setTimeout(() => notification.remove(), 3000);
+}
+
+// Student validation and preview
+async function checkStudent(libraryId) {
+    const studentPreview = document.getElementById('studentPreview');
+    const studentDetails = document.getElementById('studentDetails');
+    const borrowBtn = document.getElementById('borrowBtn');
+    
+    if (!libraryId.trim()) {
+        studentPreview.style.display = 'none';
+        borrowBtn.disabled = false;
+        borrowBtn.innerHTML = '<i class="fa fa-handshake"></i> Borrow Book';
+        borrowBtn.style.background = 'linear-gradient(135deg, #10b981 0%, #047857 100%)';
+        return;
+    }
+    
+    // Show loading state
+    studentDetails.innerHTML = `
+        <div style="display:flex; align-items:center; gap:10px; color:#f59e0b;">
+            <div class="spinner" style="border:2px solid #f3f4f6; border-top:2px solid #f59e0b; border-radius:50%; width:20px; height:20px; animation:spin 1s linear infinite;"></div>
+            <span>Checking student information...</span>
+        </div>
+    `;
+    studentPreview.style.display = 'block';
+    
+    try {
+        // Use fetch to check student directly via PHP
+        const response = await fetch('check_student.php', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: 'library_id=' + encodeURIComponent(libraryId)
+        });
+        
+        if (!response.ok) throw new Error('Network error');
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            const student = data.student;
+            const isInLibrary = data.is_in_library;
+            const activeBorrows = data.active_borrows || 0;
+            const overdueCount = data.overdue_count || 0;
+            
+            // Create student info display
+            studentDetails.innerHTML = `
+                <div style="display:flex; gap:15px; align-items:center;">
+                    <div style="background:#3b82f6; color:white; width:60px; height:60px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:24px; flex-shrink:0;">
+                        ${escapeHtml(student.name.charAt(0).toUpperCase())}
+                    </div>
+                    <div style="flex-grow:1;">
+                        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:5px;">
+                            <div>
+                                <div style="font-weight:600; color:#111; margin-bottom:2px;">${escapeHtml(student.name)}</div>
+                                <div style="font-size:12px; color:#6b7280; margin-bottom:5px;">
+                                    <span style="display:inline-flex; align-items:center; gap:3px;">
+                                        <i class="fa fa-id-card"></i> ${escapeHtml(student.library_id)}
+                                    </span>
+                                </div>
+                            </div>
+                            <span class="badge" style="background:${isInLibrary ? '#10b981' : '#ef4444'}; color:white; padding:2px 8px; border-radius:10px; font-size:11px; display:inline-flex; align-items:center; gap:3px;">
+                                <i class="fa fa-${isInLibrary ? 'check' : 'times'}"></i> ${isInLibrary ? 'In Library' : 'Not in Library'}
+                            </span>
+                        </div>
+                        <div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:8px;">
+                            <span class="badge" style="background:#8b5cf6; color:white; padding:2px 8px; border-radius:10px; font-size:11px; display:inline-flex; align-items:center; gap:3px;">
+                                <i class="fa fa-graduation-cap"></i> ${escapeHtml(student.department || 'N/A')}
+                            </span>
+                            <span class="badge" style="background:#3b82f6; color:white; padding:2px 8px; border-radius:10px; font-size:11px; display:inline-flex; align-items:center; gap:3px;">
+                                <i class="fa fa-calendar"></i> ${escapeHtml(student.semester || 'N/A')}
+                            </span>
+                            <span class="badge" style="background:${activeBorrows < 5 ? '#10b981' : '#ef4444'}; color:white; padding:2px 8px; border-radius:10px; font-size:11px; display:inline-flex; align-items:center; gap:3px;">
+                                <i class="fa fa-book"></i> ${activeBorrows} active borrows
+                            </span>
+                            ${overdueCount > 0 ? `
+                            <span class="badge" style="background:#ef4444; color:white; padding:2px 8px; border-radius:10px; font-size:11px; display:inline-flex; align-items:center; gap:3px;">
+                                <i class="fa fa-exclamation-triangle"></i> ${overdueCount} overdue
+                            </span>
+                            ` : ''}
+                        </div>
+                        ${!isInLibrary ? `
+                        <div style="margin-top:8px; padding:6px 10px; background:#fee2e2; border-radius:5px; border-left:3px solid #ef4444;">
+                            <div style="font-size:11px; color:#991b1b;">
+                                <i class="fa fa-exclamation-triangle"></i> Student must be in the library to borrow books
+                            </div>
+                        </div>
+                        ` : ''}
+                        ${overdueCount > 0 ? `
+                        <div style="margin-top:8px; padding:6px 10px; background:#fef3c7; border-radius:5px; border-left:3px solid #f59e0b;">
+                            <div style="font-size:11px; color:#92400e;">
+                                <i class="fa fa-exclamation-triangle"></i> Student has ${overdueCount} overdue book(s)
+                            </div>
+                        </div>
+                        ` : ''}
+                        ${activeBorrows >= 5 ? `
+                        <div style="margin-top:8px; padding:6px 10px; background:#fee2e2; border-radius:5px; border-left:3px solid #ef4444;">
+                            <div style="font-size:11px; color:#991b1b;">
+                                <i class="fa fa-exclamation-triangle"></i> Maximum borrowing limit (5 books) reached
+                            </div>
+                        </div>
+                        ` : ''}
+                    </div>
+                </div>
+            `;
+            
+            // Update borrow button state
+            if (!isInLibrary || overdueCount > 0 || activeBorrows >= 5) {
+                borrowBtn.disabled = true;
+                borrowBtn.style.background = 'linear-gradient(135deg, #94a3b8 0%, #64748b 100%)';
+                borrowBtn.innerHTML = '<i class="fa fa-ban"></i> Cannot Borrow';
+            } else {
+                borrowBtn.disabled = false;
+                borrowBtn.style.background = 'linear-gradient(135deg, #10b981 0%, #047857 100%)';
+                borrowBtn.innerHTML = '<i class="fa fa-handshake"></i> Borrow Book';
+            }
+        } else {
+            studentDetails.innerHTML = `
+                <div style="color:#ef4444; display:flex; align-items:center; gap:8px;">
+                    <i class="fa fa-times-circle" style="font-size:18px;"></i>
+                    <div>
+                        <div style="font-weight:500;">Student Not Found</div>
+                        <div style="font-size:12px; color:#9ca3af;">No student found with this Library ID</div>
+                    </div>
+                </div>
+            `;
+            
+            // Disable borrow button
+            borrowBtn.disabled = true;
+            borrowBtn.style.background = 'linear-gradient(135deg, #94a3b8 0%, #64748b 100%)';
+            borrowBtn.innerHTML = '<i class="fa fa-ban"></i> Invalid Student';
+        }
+    } catch (error) {
+        console.error('Error checking student:', error);
+        studentDetails.innerHTML = `
+            <div style="color:#f59e0b; display:flex; align-items:center; gap:8px;">
+                <i class="fa fa-exclamation-circle" style="font-size:18px;"></i>
+                <div>
+                    <div style="font-weight:500;">Error checking student</div>
+                    <div style="font-size:12px; color:#9ca3af;">Please try again or check connection</div>
+                </div>
+            </div>
+        `;
+        
+        // Reset borrow button
+        borrowBtn.disabled = false;
+        borrowBtn.style.background = 'linear-gradient(135deg, #10b981 0%, #047857 100%)';
+        borrowBtn.innerHTML = '<i class="fa fa-handshake"></i> Borrow Book';
+    }
+}
+
+// Book copy validation and preview - UPDATED VERSION
 async function checkBookCopy(copyNumber) {
     const bookPreview = document.getElementById('bookPreview');
     const bookDetails = document.getElementById('bookDetails');
+    const borrowBtn = document.getElementById('borrowBtn');
     
     if (!copyNumber.trim()) {
         bookPreview.style.display = 'none';
@@ -1034,117 +1328,146 @@ async function checkBookCopy(copyNumber) {
     bookPreview.style.display = 'block';
     
     try {
-        // Check if copy number exists and get its status
-        const response = await fetch(`../api/dispatch.php?resource=book-copies&search=${encodeURIComponent(copyNumber)}`, {
-            credentials: 'same-origin'
+        // Use fetch to check book copy directly via PHP
+        const response = await fetch('check_book_copy.php', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: 'copy_number=' + encodeURIComponent(copyNumber)
         });
         
         if (!response.ok) throw new Error('Network error');
         
         const data = await response.json();
         
-        // Handle different response formats
-        let book = null;
-        if (Array.isArray(data) && data.length > 0) {
-            book = data[0];
-        } else if (typeof data === 'object' && data.copy_number) {
-            book = data;
-        }
-        
-        if (book) {
-            // Check book status
+        if (data.success) {
+            const book = data.book;
             const status = book.status.toLowerCase();
             const condition = book.book_condition || 'good';
             const conditionColor = getConditionColor(condition);
             const statusColor = getStatusColor(status);
             
-            // Get book details for cover image and more info
-            const bookDetailResponse = await fetch(`../api/dispatch.php?resource=books&id=${book.book_id}`, {
-                credentials: 'same-origin'
-            });
+            // ADDITIONAL CHECK: Check if this specific copy is already borrowed
+            // We need to make another request to check borrow_logs
+            let isAlreadyBorrowed = false;
+            try {
+                const borrowCheckResponse = await fetch('check_copy_borrow.php', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: 'copy_id=' + encodeURIComponent(book.id)
+                });
+                
+                if (borrowCheckResponse.ok) {
+                    const borrowData = await borrowCheckResponse.json();
+                    isAlreadyBorrowed = borrowData.success && borrowData.is_borrowed;
+                }
+            } catch (borrowError) {
+                console.error('Error checking borrow status:', borrowError);
+            }
             
-            if (bookDetailResponse.ok) {
-                const bookInfo = await bookDetailResponse.json();
-                
-                // Determine cover image - check both cover_image and cover_image_cache
-                let coverImage = '<?= $default_cover ?>';
-                if (bookInfo.cover_image_cache && bookInfo.cover_image_cache !== 'null') {
-                    coverImage = `../uploads/covers/${bookInfo.cover_image_cache}`;
-                } else if (bookInfo.cover_image && bookInfo.cover_image !== 'null') {
-                    coverImage = `../uploads/covers/${bookInfo.cover_image}`;
-                }
-                
-                // Create status badge
-                let statusBadge = '';
-                if (status === 'available') {
-                    statusBadge = `<span class="badge" style="background:#10b981; color:white; padding:2px 8px; border-radius:10px; font-size:11px;">
-                        <i class="fa fa-check"></i> Available for Borrowing
-                    </span>`;
-                } else if (status === 'reserved') {
-                    statusBadge = `<span class="badge" style="background:#f59e0b; color:white; padding:2px 8px; border-radius:10px; font-size:11px;">
-                        <i class="fa fa-clock"></i> Reserved
-                    </span>`;
-                } else if (status === 'borrowed') {
-                    statusBadge = `<span class="badge" style="background:#ef4444; color:white; padding:2px 8px; border-radius:10px; font-size:11px;">
-                        <i class="fa fa-times"></i> Already Borrowed
-                    </span>`;
-                } else {
-                    statusBadge = `<span class="badge" style="background:#94a3b8; color:white; padding:2px 8px; border-radius:10px; font-size:11px;">
-                        ${status.charAt(0).toUpperCase() + status.slice(1)}
-                    </span>`;
-                }
-                
-                bookDetails.innerHTML = `
-                    <div style="display:flex; gap:15px; align-items:center;">
-                        <div style="flex-shrink:0; position:relative;">
-                            <img src="${coverImage}" 
-                                 alt="Book Cover" 
-                                 style="width:70px; height:90px; object-fit:cover; border-radius:6px; border:2px solid white; box-shadow:0 2px 4px rgba(0,0,0,0.1);">
-                            <div style="position:absolute; top:-5px; right:-5px; background:${statusColor}; color:white; width:20px; height:20px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:10px;">
-                                ${status === 'available' ? '✓' : status === 'reserved' ? '!' : '✗'}
-                            </div>
-                        </div>
-                        <div style="flex-grow:1;">
-                            <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:5px;">
-                                <div>
-                                    <div style="font-weight:600; color:#111; margin-bottom:2px;">${escapeHtml(bookInfo.title)}</div>
-                                    <div style="font-size:12px; color:#6b7280; margin-bottom:5px;">by ${escapeHtml(bookInfo.author || 'Unknown')}</div>
-                                </div>
-                                ${statusBadge}
-                            </div>
-                            <div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:8px;">
-                                <span class="badge" style="background:#3b82f6; color:white; padding:2px 8px; border-radius:10px; font-size:11px; display:inline-flex; align-items:center; gap:3px;">
-                                    <i class="fa fa-barcode"></i> ${escapeHtml(book.copy_number)}
-                                </span>
-                                <span class="badge" style="background:${conditionColor}; color:white; padding:2px 8px; border-radius:10px; font-size:11px; display:inline-flex; align-items:center; gap:3px;">
-                                    <i class="fa fa-stethoscope"></i> ${escapeHtml(condition)}
-                                </span>
-                                <span class="badge" style="background:#8b5cf6; color:white; padding:2px 8px; border-radius:10px; font-size:11px; display:inline-flex; align-items:center; gap:3px;">
-                                    <i class="fa fa-hashtag"></i> ${bookInfo.isbn || 'No ISBN'}
-                                </span>
-                            </div>
-                            ${status !== 'available' ? `
-                            <div style="margin-top:8px; padding:6px 10px; background:#fee2e2; border-radius:5px; border-left:3px solid #ef4444;">
-                                <div style="font-size:11px; color:#991b1b;">
-                                    <i class="fa fa-exclamation-triangle"></i> This book cannot be borrowed. Status: <strong>${escapeHtml(status)}</strong>
-                                </div>
-                            </div>
-                            ` : ''}
+            // Determine cover image
+            let coverImage = '<?= $default_cover ?>';
+            if (book.cover_image_cache && book.cover_image_cache !== 'null') {
+                coverImage = '../uploads/covers/' + book.cover_image_cache;
+            } else if (book.cover_image && book.cover_image !== 'null') {
+                coverImage = '../uploads/covers/' + book.cover_image;
+            }
+            
+            // Create status badge - UPDATED to check both status and borrow_logs
+            let statusBadge = '';
+            let canBorrow = status === 'available' && !isAlreadyBorrowed;
+            
+            if (canBorrow) {
+                statusBadge = `<span class="badge" style="background:#10b981; color:white; padding:2px 8px; border-radius:10px; font-size:11px;">
+                    <i class="fa fa-check"></i> Available for Borrow
+                </span>`;
+            } else if (isAlreadyBorrowed) {
+                statusBadge = `<span class="badge" style="background:#ef4444; color:white; padding:2px 8px; border-radius:10px; font-size:11px;">
+                    <i class="fa fa-times"></i> Already Borrowed
+                </span>`;
+            } else if (status === 'reserved') {
+                statusBadge = `<span class="badge" style="background:#f59e0b; color:white; padding:2px 8px; border-radius:10px; font-size:11px;">
+                    <i class="fa fa-clock"></i> Reserved
+                </span>`;
+            } else if (status === 'borrowed') {
+                statusBadge = `<span class="badge" style="background:#ef4444; color:white; padding:2px 8px; border-radius:10px; font-size:11px;">
+                    <i class="fa fa-times"></i> Borrowed
+                </span>`;
+            } else {
+                statusBadge = `<span class="badge" style="background:#94a3b8; color:white; padding:2px 8px; border-radius:10px; font-size:11px;">
+                    ${escapeHtml(status.charAt(0).toUpperCase() + status.slice(1))}
+                </span>`;
+            }
+            
+            // Get location if available
+            let location = '';
+            if (book.current_section) {
+                location = `${book.current_section}-S${book.current_shelf}-R${book.current_row}-P${book.current_slot}`;
+            }
+            
+            bookDetails.innerHTML = `
+                <div style="display:flex; gap:15px; align-items:center;">
+                    <div style="flex-shrink:0; position:relative;">
+                        <img src="${coverImage}" 
+                             alt="Book Cover" 
+                             style="width:70px; height:90px; object-fit:cover; border-radius:6px; border:2px solid white; box-shadow:0 2px 4px rgba(0,0,0,0.1);">
+                        <div style="position:absolute; top:-5px; right:-5px; background:${canBorrow ? '#10b981' : statusColor}; color:white; width:20px; height:20px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:10px;">
+                            ${canBorrow ? '✓' : isAlreadyBorrowed ? '✗' : status === 'available' ? '✓' : status === 'reserved' ? '!' : '✗'}
                         </div>
                     </div>
-                `;
-                
-                // Highlight the borrow button based on status
-                const borrowBtn = document.querySelector('#borrowForm button[type="submit"]');
-                if (status === 'available') {
-                    borrowBtn.style.background = 'linear-gradient(135deg, #10b981 0%, #047857 100%)';
-                    borrowBtn.disabled = false;
-                    borrowBtn.innerHTML = '<i class="fa fa-handshake"></i> Borrow Book';
-                } else {
-                    borrowBtn.style.background = 'linear-gradient(135deg, #94a3b8 0%, #64748b 100%)';
-                    borrowBtn.disabled = true;
-                    borrowBtn.innerHTML = '<i class="fa fa-ban"></i> Cannot Borrow';
-                }
+                    <div style="flex-grow:1;">
+                        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:5px;">
+                            <div>
+                                <div style="font-weight:600; color:#111; margin-bottom:2px;">${escapeHtml(book.title)}</div>
+                                <div style="font-size:12px; color:#6b7280; margin-bottom:5px;">
+                                    by ${escapeHtml(book.author || 'Unknown')}
+                                </div>
+                            </div>
+                            ${statusBadge}
+                        </div>
+                        <div style="font-size:11px; color:#6b7280; margin-bottom:8px; line-height:1.4;">
+                            ${book.description ? escapeHtml(book.description.substring(0, 100)) + '...' : 'No description available'}
+                        </div>
+                        <div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:8px;">
+                            <span class="badge" style="background:#3b82f6; color:white; padding:2px 8px; border-radius:10px; font-size:11px; display:inline-flex; align-items:center; gap:3px;">
+                                <i class="fa fa-barcode"></i> ${escapeHtml(book.copy_number)}
+                            </span>
+                            <span class="badge" style="background:${conditionColor}; color:white; padding:2px 8px; border-radius:10px; font-size:11px; display:inline-flex; align-items:center; gap:3px;">
+                                <i class="fa fa-stethoscope"></i> ${escapeHtml(condition)}
+                            </span>
+                            <span class="badge" style="background:#8b5cf6; color:white; padding:2px 8px; border-radius:10px; font-size:11px; display:inline-flex; align-items:center; gap:3px;">
+                                <i class="fa fa-hashtag"></i> ${escapeHtml(book.isbn || 'No ISBN')}
+                            </span>
+                            ${location ? `
+                            <span class="badge" style="background:#10b981; color:white; padding:2px 8px; border-radius:10px; font-size:11px; display:inline-flex; align-items:center; gap:3px;">
+                                <i class="fa fa-map-marker"></i> ${escapeHtml(location)}
+                            </span>
+                            ` : ''}
+                        </div>
+                        ${!canBorrow ? `
+                        <div style="margin-top:8px; padding:6px 10px; background:#fee2e2; border-radius:5px; border-left:3px solid #ef4444;">
+                            <div style="font-size:11px; color:#991b1b;">
+                                <i class="fa fa-exclamation-triangle"></i> This book cannot be borrowed. 
+                                ${isAlreadyBorrowed ? 'Already borrowed by another student.' : `Status: <strong>${escapeHtml(status)}</strong>`}
+                            </div>
+                        </div>
+                        ` : ''}
+                    </div>
+                </div>
+            `;
+            
+            // Check if borrow button should be enabled
+            const currentStudentId = document.getElementById('borrow_library_id').value;
+            if (!canBorrow && borrowBtn.disabled === false) {
+                borrowBtn.disabled = true;
+                borrowBtn.style.background = 'linear-gradient(135deg, #94a3b8 0%, #64748b 100%)';
+                borrowBtn.innerHTML = '<i class="fa fa-ban"></i> Cannot Borrow';
+            } else if (canBorrow && currentStudentId && !borrowBtn.disabled) {
+                // Re-check student to ensure they're still valid
+                checkStudent(currentStudentId);
             }
         } else {
             bookDetails.innerHTML = `
@@ -1157,11 +1480,12 @@ async function checkBookCopy(copyNumber) {
                 </div>
             `;
             
-            // Disable borrow button
-            const borrowBtn = document.querySelector('#borrowForm button[type="submit"]');
-            borrowBtn.style.background = 'linear-gradient(135deg, #94a3b8 0%, #64748b 100%)';
-            borrowBtn.disabled = true;
-            borrowBtn.innerHTML = '<i class="fa fa-ban"></i> Invalid Copy';
+            // Disable borrow button if it was enabled
+            if (borrowBtn.disabled === false) {
+                borrowBtn.disabled = true;
+                borrowBtn.style.background = 'linear-gradient(135deg, #94a3b8 0%, #64748b 100%)';
+                borrowBtn.innerHTML = '<i class="fa fa-ban"></i> Invalid Book';
+            }
         }
     } catch (error) {
         console.error('Error checking book copy:', error);
@@ -1176,10 +1500,11 @@ async function checkBookCopy(copyNumber) {
         `;
         
         // Reset borrow button
-        const borrowBtn = document.querySelector('#borrowForm button[type="submit"]');
-        borrowBtn.style.background = 'linear-gradient(135deg, #10b981 0%, #047857 100%)';
-        borrowBtn.disabled = false;
-        borrowBtn.innerHTML = '<i class="fa fa-handshake"></i> Borrow Book';
+        const currentStudentId = document.getElementById('borrow_library_id').value;
+        if (currentStudentId) {
+            // Re-check student to update button state
+            checkStudent(currentStudentId);
+        }
     }
 }
 
@@ -1236,12 +1561,16 @@ document.addEventListener('DOMContentLoaded', function() {
         document.getElementById('borrowErrorModal').style.display = 'flex';
     <?php endif; ?>
     
-    // Add animation for book preview
+    // Add animations
     const style = document.createElement('style');
     style.textContent = `
         @keyframes fadeIn {
             from { opacity: 0; transform: translateY(-10px); }
             to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes slideIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
         }
         @keyframes spin {
             0% { transform: rotate(0deg); }
@@ -1398,7 +1727,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 }
 
-/* Animation for book preview */
+/* Animation for preview sections */
 @keyframes fadeIn {
     from {
         opacity: 0;
@@ -1443,6 +1772,32 @@ document.addEventListener('DOMContentLoaded', function() {
     .data-table th,
     .data-table td {
         padding: 10px;
+    }
+    
+    /* Adjust borrow form for mobile */
+    #borrowForm {
+        grid-template-columns: 1fr !important;
+        gap: 10px !important;
+    }
+    
+    /* Adjust preview sections for mobile */
+    #studentPreview, #bookPreview {
+        margin-top: 10px !important;
+    }
+    
+    #studentDetails, #bookDetails {
+        flex-direction: column !important;
+        align-items: flex-start !important;
+    }
+    
+    #studentDetails > div, #bookDetails > div {
+        flex-direction: column !important;
+        gap: 10px !important;
+    }
+    
+    #studentDetails img, #bookDetails img {
+        width: 50px !important;
+        height: 65px !important;
     }
 }
 </style>

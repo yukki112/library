@@ -1,7 +1,7 @@
 <?php
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/db.php';
-require_once __DIR__ . '/../includes/fpdf/fpdf.php';
+require_once __DIR__ . '/../vendor/setasign/fpdf/fpdf.php';
 require_login();
 
 $pdo = DB::conn();

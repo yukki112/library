@@ -147,7 +147,12 @@ try {
             (SELECT COUNT(*) FROM reservations r2 
              WHERE r2.book_id = r.book_id 
              AND r2.patron_id = r.patron_id 
-             AND r2.status = 'pending') as pending_reservations_for_book
+             AND r2.status = 'pending') as pending_reservations_for_book,
+            -- Get total available copies count for this book
+            (SELECT COUNT(*) FROM book_copies bc2 
+             WHERE bc2.book_id = r.book_id 
+             AND bc2.status = 'available' 
+             AND bc2.is_active = 1) as available_copies_count
         FROM reservations r
         JOIN books b ON r.book_id = b.id
         LEFT JOIN categories c ON b.category_id = c.id
@@ -381,6 +386,7 @@ include __DIR__ . '/_header.php';
                         $copyId = isset($row['copy_id']) ? (int)$row['copy_id'] : null;
                         $activeBorrows = isset($row['active_borrows_for_book']) ? (int)$row['active_borrows_for_book'] : 0;
                         $pendingReservations = isset($row['pending_reservations_for_book']) ? (int)$row['pending_reservations_for_book'] : 0;
+                        $availableCopies = isset($row['available_copies_count']) ? (int)$row['available_copies_count'] : 0;
                         
                         // Get book cover image
                         $bookCover = null;
@@ -415,6 +421,11 @@ include __DIR__ . '/_header.php';
                             <div class="request-info">
                                 <span class="request-id">#<?php echo $resId; ?></span>
                                 <span class="request-date"><?php echo $reservedDate; ?></span>
+                                <?php if ($status === 'pending' && $availableCopies > 0): ?>
+                                <span class="available-copies" style="font-size: 0.75rem; color: #10b981;">
+                                    (<?php echo $availableCopies; ?> available copies)
+                                </span>
+                                <?php endif; ?>
                             </div>
                             <span class="request-status" style="background: <?php echo $statusColor; ?>20; color: <?php echo $statusColor; ?>; border-color: <?php echo $statusColor; ?>;">
                                 <?php echo ucfirst($status); ?>
@@ -447,6 +458,9 @@ include __DIR__ . '/_header.php';
                                     <?php if (!empty($row['copy_id'])): ?>
                                     <span class="meta-item copy-id">Copy ID: <?php echo htmlspecialchars($row['copy_id']); ?></span>
                                     <?php endif; ?>
+                                    <?php if (!empty($row['reservation_type'])): ?>
+                                    <span class="meta-item type-tag"><?php echo $row['reservation_type'] === 'specific_copy' ? 'Specific Copy' : 'Any Copy'; ?></span>
+                                    <?php endif; ?>
                                 </div>
                                 <?php if (!empty($row['notes'])): ?>
                                 <div class="request-notes">
@@ -456,6 +470,11 @@ include __DIR__ . '/_header.php';
                                 <?php if ($status === 'pending' && $pendingReservations > 1): ?>
                                 <div class="request-notes" style="background: #fff3cd; border-left-color: #ffc107;">
                                     <strong>Note:</strong> Patron has <?php echo $pendingReservations; ?> pending reservations for this book
+                                </div>
+                                <?php endif; ?>
+                                <?php if ($status === 'pending' && $availableCopies < $pendingReservations): ?>
+                                <div class="request-notes" style="background: #fee2e2; border-left-color: #ef4444;">
+                                    <strong>Warning:</strong> Only <?php echo $availableCopies; ?> copies available for <?php echo $pendingReservations; ?> requests
                                 </div>
                                 <?php endif; ?>
                             </div>
@@ -526,14 +545,12 @@ include __DIR__ . '/_header.php';
                                         data-res-id="<?php echo $resId; ?>" 
                                         data-book-id="<?php echo $bookId; ?>" 
                                         data-patron-id="<?php echo $patronId; ?>"
-                                        data-copy-id="<?php echo $bookCopyId; ?>"
-                                        data-active-borrows="<?php echo $activeBorrows; ?>"
-                                        data-pending-reservations="<?php echo $pendingReservations; ?>">
+                                        data-copy-id="<?php echo $bookCopyId; ?>">
                                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                         <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
                                         <polyline points="22 4 12 14.01 9 11.01"/>
                                     </svg>
-                                    <?php echo $pendingReservations > 1 ? "Accept All (" . $pendingReservations . ")" : "Accept"; ?>
+                                    Accept
                                 </button>
                                 <button class="btn-action btn-decline" 
                                         data-res-id="<?php echo $resId; ?>">
@@ -893,6 +910,12 @@ function viewReservationDetails(resId) {
                         <span class="detail-value">${reservation.active_borrows_for_book}</span>
                     </div>
                     ` : ''}
+                    ${reservation.available_copies_count !== undefined ? `
+                    <div class="detail-item">
+                        <span class="detail-label">Available Copies:</span>
+                        <span class="detail-value">${reservation.available_copies_count}</span>
+                    </div>
+                    ` : ''}
                     ${reservation.borrow_due_date ? `
                     <div class="detail-item">
                         <span class="detail-label">Due Date:</span>
@@ -1010,15 +1033,9 @@ function closeDetailsModal() {
     document.body.style.overflow = 'auto';
 }
 
-// Accept reservation - FIXED TO HANDLE MULTIPLE COPIES
-async function acceptReservation(resId, bookId, patronId, copyId = null, activeBorrows = 0, pendingReservations = 1) {
-    // Show confirmation message based on pending reservations count
-    let confirmMessage = 'Approve this reservation?';
-    if (pendingReservations > 1) {
-        confirmMessage = `Patron has ${pendingReservations} pending reservations for this book. Approve ALL ${pendingReservations} reservations?`;
-    }
-    
-    if (!confirm(confirmMessage)) return;
+// Accept reservation - SIMPLIFIED VERSION (individual only)
+async function acceptReservation(resId, bookId, patronId, copyId = null) {
+    if (!confirm('Approve this reservation?')) return;
     
     const btn = document.querySelector(`.btn-accept[data-res-id="${resId}"]`);
     const originalText = btn.innerHTML;
@@ -1026,9 +1043,9 @@ async function acceptReservation(resId, bookId, patronId, copyId = null, activeB
     btn.disabled = true;
     
     try {
-        // Use the stored procedure to process all pending reservations for this book and patron
-        const res = await fetch(`../api/dispatch.php?resource=reservations_accept_all&book_id=${bookId}&patron_id=${patronId}&starting_reservation_id=${resId}`, {
-            method: 'POST',
+        // Use the regular reservations endpoint to update status to approved
+        const res = await fetch(`../api/dispatch.php?resource=reservations&id=${resId}`, {
+            method: 'PUT',
             headers: {
                 'Content-Type': 'application/json',
                 'X-CSRF-Token': csrfToken
@@ -1044,17 +1061,13 @@ async function acceptReservation(resId, bookId, patronId, copyId = null, activeB
             throw new Error(out.error || 'Approval failed');
         }
         
-        if (out.reservations_processed > 0) {
-            showToast(`Successfully approved ${out.reservations_processed} reservation(s) and created ${out.borrow_logs_created} borrow record(s)!`, 'success');
-        } else {
-            showToast('Reservation approved, but no new borrow logs were created (possibly already processed).', 'warning');
-        }
+        showToast('Reservation approved successfully!', 'success');
         
         setTimeout(() => window.location.reload(), 1500);
         
     } catch (err) {
         console.error('Error:', err);
-        showToast(err.message || 'Failed to approve reservation(s)', 'error');
+        showToast(err.message || 'Failed to approve reservation', 'error');
         btn.innerHTML = originalText;
         btn.disabled = false;
     }
@@ -1339,9 +1352,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const bookId = btn.getAttribute('data-book-id');
             const patronId = btn.getAttribute('data-patron-id');
             const copyId = btn.getAttribute('data-copy-id');
-            const activeBorrows = btn.getAttribute('data-active-borrows') || 0;
-            const pendingReservations = btn.getAttribute('data-pending-reservations') || 1;
-            acceptReservation(resId, bookId, patronId, copyId, activeBorrows, pendingReservations);
+            acceptReservation(resId, bookId, patronId, copyId);
         });
     });
     
@@ -1388,6 +1399,8 @@ document.addEventListener('DOMContentLoaded', () => {
 </script>
 
 <style>
+/* [ALL THE CSS STAYS EXACTLY THE SAME - NO CHANGES NEEDED] */
+/* [Include all the CSS from the previous version - it remains unchanged] */
 
 /* Modern Design System */
 :root {
@@ -1931,6 +1944,11 @@ document.addEventListener('DOMContentLoaded', () => {
 .book-meta .copy-tag {
     background: #f3e8ff;
     color: #7c3aed;
+}
+
+.book-meta .type-tag {
+    background: #fef3c7;
+    color: #92400e;
 }
 
 .request-notes {

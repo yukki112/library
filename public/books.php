@@ -1,11 +1,15 @@
 <?php
 // Enhanced catalogue page with modern design, pagination, and improved UX
+// Includes hidden Elasticsearch AI-powered search capabilities
 
 // Load required files - use absolute paths to be safe
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/config.php';
 require_once __DIR__ . '/../includes/db.php'; // Add this line
 require_login();
+
+// Load Elasticsearch AI Mock
+require_once __DIR__ . '/../includes/elasticsearch_ai_mock.php';
 
 $u = current_user();
 if (!in_array($u['role'], ['student','non_staff'], true)) {
@@ -22,6 +26,9 @@ if (session_status() !== PHP_SESSION_ACTIVE) {
 if (empty($_SESSION['csrf_token'])) {
     $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
 }
+
+// Initialize Elasticsearch AI
+$elasticAI = ElasticsearchAIMock::getInstance();
 
 include __DIR__ . '/_header.php';
 
@@ -42,6 +49,9 @@ $offset = ($current_page - 1) * $books_per_page;
 
 // Check if viewing specific book details
 $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
+
+// Handle AI search if enabled
+$ai_search_enabled = true; // Always enabled but hidden from users
 ?>
 
 <div class="page-container">
@@ -49,6 +59,17 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
         <div class="header-content">
             <h1 class="page-title">Book Catalogue</h1>
             <p class="page-subtitle">Explore our extensive collection of literary works</p>
+            <?php if ($ai_search_enabled): ?>
+            <div class="ai-search-indicator" style="display: none; margin-top: 10px; font-size: 0.85rem; color: #6b7280;">
+                <span class="ai-icon" style="display: inline-flex; align-items: center; gap: 4px;">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 2a10 10 0 1 0 10 10"/>
+                        <path d="m9 12 2 2 4-4"/>
+                    </svg>
+                    Intelligent search active
+                </span>
+            </div>
+            <?php endif; ?>
         </div>
     </div>
 
@@ -880,7 +901,7 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
     <div class="catalogue-container">
         <div class="catalogue-controls card">
             <div class="search-section">
-                <div class="search-box">
+                <div class="search-box" id="searchBox">
                     <div class="search-icon">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <circle cx="11" cy="11" r="8"/>
@@ -889,11 +910,14 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
                     </div>
                     <input id="bookSearch" type="text" 
                            placeholder="Search books by title, author, ISBN, or category..." 
-                           class="search-input">
+                           class="search-input"
+                           autocomplete="off">
                     <button id="btnBookSearch" class="btn-search">
                         Search
                     </button>
                 </div>
+                <div id="aiSuggestions" class="ai-suggestions" style="display: none;"></div>
+                <div id="spellingCorrection" class="spelling-correction" style="display: none;"></div>
             </div>
             
             <div class="filters-section">
@@ -916,6 +940,7 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
                         <option value="title">Title A-Z</option>
                         <option value="available">Available Now</option>
                         <option value="popular">Most Popular</option>
+                        <option value="relevance" selected>Relevance</option>
                     </select>
                 </div>
                 
@@ -955,6 +980,10 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
                 <span class="stat-label">Categories</span>
                 <span class="stat-value"><?php echo count($categories); ?></span>
             </div>
+            <div class="stat-item ai-stat" style="display: none;">
+                <span class="stat-label">AI Insights</span>
+                <span class="stat-value" id="aiInsights">0</span>
+            </div>
         </div>
 
         <!-- Books Container -->
@@ -976,6 +1005,604 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
     let currentView = 'grid';
     let currentPage = <?php echo $current_page; ?>;
     const booksPerPage = <?php echo $books_per_page; ?>; // This is now 4
+    let aiSearchEnabled = <?php echo $ai_search_enabled ? 'true' : 'false'; ?>;
+    let searchTimeout = null;
+    let lastSearchQuery = '';
+    let lastCorrectedQuery = '';
+    let isMisspellingCorrected = false;
+
+    // AI Search Functions
+    async function performAISearch(query, books) {
+        if (!aiSearchEnabled || !query.trim()) {
+            return books;
+        }
+
+        try {
+            // Show AI indicator
+            const indicator = document.querySelector('.ai-search-indicator');
+            if (indicator) {
+                indicator.style.display = 'block';
+            }
+
+            console.log('AI Search processing:', query);
+            
+            // First check for spelling corrections
+            const correctedQuery = await checkSpellingCorrection(query);
+            
+            // Show spelling correction if needed
+            if (correctedQuery && correctedQuery !== query) {
+                isMisspellingCorrected = true;
+                showSpellingCorrection(query, correctedQuery);
+                query = correctedQuery;
+                lastCorrectedQuery = correctedQuery;
+            } else {
+                isMisspellingCorrected = false;
+                hideSpellingCorrection();
+            }
+            
+            // Simulate AI processing delay
+            await new Promise(resolve => setTimeout(resolve, 50));
+            
+            // Create a copy of books for AI processing
+            let aiProcessedBooks = [...books];
+            
+            // Apply AI-powered filtering and ranking
+            const queryLower = query.toLowerCase();
+            
+            // Score each book based on multiple factors
+            const scoredBooks = books.map(book => {
+                let score = 0;
+                
+                // Factor 1: Exact matches (highest priority)
+                const title = (book.title || '').toLowerCase();
+                const author = (book.author || '').toLowerCase();
+                const category = (book.category || '').toLowerCase();
+                const description = (book.description || '').toLowerCase();
+                
+                if (title.includes(queryLower)) score += 100;
+                if (author.includes(queryLower)) score += 80;
+                if (book.isbn && book.isbn.toLowerCase().includes(queryLower)) score += 100;
+                if (category.includes(queryLower)) score += 60;
+                if (description.includes(queryLower)) score += 30;
+                
+                // Factor 2: Semantic understanding
+                const semanticBonus = calculateSemanticBonus(queryLower, book);
+                score += semanticBonus;
+                
+                // Factor 3: Availability boost
+                const availableCopies = book.available_copies || book.available_copies_cache || 0;
+                if (availableCopies > 0) {
+                    score += 25;
+                    if (availableCopies > 3) score += 15;
+                }
+                
+                // Factor 4: Recency boost
+                const year = book.year_published || 0;
+                const currentYear = new Date().getFullYear();
+                if (year >= (currentYear - 2)) score += 30;
+                else if (year >= (currentYear - 5)) score += 20;
+                else if (year >= (currentYear - 10)) score += 10;
+                
+                // Factor 5: Popularity boost
+                const totalCopies = book.total_copies || book.total_copies_cache || 0;
+                if (totalCopies > 10) score += 20;
+                else if (totalCopies > 5) score += 10;
+                
+                // Factor 6: Conceptual matches
+                if (isConceptualMatch(queryLower, book)) {
+                    score += 40;
+                }
+                
+                // Factor 7: Misspelling tolerance (if user typed misspelling)
+                if (isMisspellingCorrected) {
+                    const originalQuery = lastSearchQuery.toLowerCase();
+                    if (title.includes(originalQuery)) score += 15;
+                    if (author.includes(originalQuery)) score += 10;
+                    if (description.includes(originalQuery)) score += 5;
+                }
+                
+                return {
+                    book: book,
+                    score: score,
+                    aiExplanation: generateAIExplanation(queryLower, book, score, isMisspellingCorrected)
+                };
+            });
+            
+            // Filter out books with zero score and sort by score
+            const filteredBooks = scoredBooks
+                .filter(item => item.score > 0)
+                .sort((a, b) => b.score - a.score)
+                .map(item => item.book);
+            
+            // Update AI insights
+            updateAIInsights({
+                total_matches: filteredBooks.length,
+                corrected_spelling: isMisspellingCorrected,
+                semantic_matches: filteredBooks.length > 0
+            });
+            
+            return filteredBooks;
+            
+        } catch (error) {
+            console.error('AI Search failed:', error);
+            return books; // Fallback to regular search
+        }
+    }
+    
+    function calculateSemanticBonus(query, book) {
+        let bonus = 0;
+        const title = (book.title || '').toLowerCase();
+        const description = (book.description || '').toLowerCase();
+        
+        // Programming related
+        if (query.includes('programming') || query.includes('coding') || query.includes('software')) {
+            if (title.includes('code') || title.includes('software') || title.includes('developer') ||
+                description.includes('programming') || description.includes('coding')) {
+                bonus += 50;
+            }
+        }
+        
+        // Arts related
+        if (query.includes('art') || query.includes('painting') || query.includes('drawing')) {
+            if (title.includes('art') || title.includes('painting') || title.includes('drawing') ||
+                description.includes('art') || description.includes('creative')) {
+                bonus += 50;
+            }
+        }
+        
+        // Business related
+        if (query.includes('business') || query.includes('management') || query.includes('finance')) {
+            if (title.includes('business') || title.includes('management') || title.includes('finance') ||
+                description.includes('business') || description.includes('strategy')) {
+                bonus += 50;
+            }
+        }
+        
+        // Data related
+        if (query.includes('data') || query.includes('database') || query.includes('storage')) {
+            if (title.includes('data') || title.includes('database') || title.includes('sql') ||
+                description.includes('data') || description.includes('storage')) {
+                bonus += 50;
+            }
+        }
+        
+        // Check for related terms in semantic patterns
+        const relatedTerms = getRelatedTerms(query);
+        relatedTerms.forEach(term => {
+            if (title.includes(term)) bonus += 20;
+            if (description.includes(term)) bonus += 10;
+        });
+        
+        return bonus;
+    }
+    
+    function getRelatedTerms(query) {
+        const terms = [];
+        
+        // Programming related
+        if (query.includes('programming') || query.includes('code')) {
+            terms.push('software', 'developer', 'algorithm', 'web', 'app', 'framework');
+        }
+        
+        // Arts related
+        if (query.includes('art') || query.includes('painting')) {
+            terms.push('design', 'creative', 'drawing', 'sketch', 'illustration', 'visual');
+        }
+        
+        // Business related
+        if (query.includes('business') || query.includes('management')) {
+            terms.push('finance', 'marketing', 'strategy', 'leadership', 'organization');
+        }
+        
+        // Data related
+        if (query.includes('data') || query.includes('database')) {
+            terms.push('sql', 'storage', 'mysql', 'mongodb', 'analysis', 'analytics');
+        }
+        
+        // Learning related
+        if (query.includes('learn') || query.includes('study')) {
+            terms.push('education', 'knowledge', 'skill', 'tutorial', 'guide');
+        }
+        
+        return terms.slice(0, 10); // Limit to 10 terms
+    }
+    
+    function isConceptualMatch(query, book) {
+        const title = (book.title || '').toLowerCase();
+        const description = (book.description || '').toLowerCase();
+        
+        // Conceptual pairs
+        const conceptualPairs = {
+            'data storage': ['database', 'sql', 'mongodb', 'redis'],
+            'web development': ['html', 'css', 'javascript', 'react', 'vue'],
+            'mobile app': ['android', 'ios', 'react native', 'flutter'],
+            'machine learning': ['ai', 'artificial intelligence', 'neural network'],
+            'cloud computing': ['aws', 'azure', 'google cloud', 'serverless'],
+            'art design': ['painting', 'drawing', 'sketching', 'illustration'],
+            'business management': ['leadership', 'strategy', 'administration'],
+            'health fitness': ['exercise', 'workout', 'nutrition', 'wellness'],
+        };
+        
+        for (const [concept, terms] of Object.entries(conceptualPairs)) {
+            if (query.includes(concept)) {
+                for (const term of terms) {
+                    if (title.includes(term) || description.includes(term)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        
+        return false;
+    }
+    
+    function generateAIExplanation(query, book, score, wasCorrected) {
+        const reasons = [];
+        
+        if (wasCorrected) {
+            reasons.push("Showing results for corrected spelling");
+        }
+        
+        const title = (book.title || '').toLowerCase();
+        if (title.includes(query)) {
+            reasons.push("Title contains your search term");
+        }
+        
+        const availableCopies = book.available_copies || book.available_copies_cache || 0;
+        if (availableCopies > 0) {
+            reasons.push("Available for immediate borrowing");
+        }
+        
+        const year = book.year_published || 0;
+        if (year >= 2020) {
+            reasons.push("Recent publication");
+        }
+        
+        const totalCopies = book.total_copies || book.total_copies_cache || 0;
+        if (totalCopies > 5) {
+            reasons.push("Popular title in our collection");
+        }
+        
+        // Check for semantic match
+        if (query.includes('programming') && 
+            (title.includes('code') || title.includes('software') || 
+             (book.description || '').toLowerCase().includes('programming'))) {
+            reasons.push("Matches programming category");
+        }
+        
+        if (query.includes('art') && 
+            (title.includes('painting') || title.includes('drawing') || 
+             (book.description || '').toLowerCase().includes('art'))) {
+            reasons.push("Matches arts category");
+        }
+        
+        if (query.includes('business') && 
+            (title.includes('management') || title.includes('finance') || 
+             (book.description || '').toLowerCase().includes('business'))) {
+            reasons.push("Matches business category");
+        }
+        
+        if (query.includes('data') && 
+            (title.includes('database') || title.includes('sql') || 
+             (book.description || '').toLowerCase().includes('data'))) {
+            reasons.push("Matches data-related books");
+        }
+        
+        return reasons.length > 0 ? reasons.join('; ') : "Relevant based on multiple factors";
+    }
+
+    async function checkSpellingCorrection(query) {
+        if (!query || query.length < 2) {
+            return query;
+        }
+
+        try {
+            // Send request to check spelling
+            const response = await fetch('../api/ai-search.php', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    action: 'check_spelling',
+                    query: query
+                })
+            });
+
+            if (response.ok) {
+                const result = await response.json();
+                if (result.success && result.corrected_query && result.corrected_query !== query) {
+                    return result.corrected_query;
+                }
+            }
+        } catch (error) {
+            console.error('Spelling check failed:', error);
+        }
+
+        // Fallback to local spelling correction
+        return performLocalSpellingCorrection(query);
+    }
+    
+    function performLocalSpellingCorrection(query) {
+        // Simple local spelling correction
+        const misspellings = {
+            // Arts related
+            'arys': 'arts',
+            'arrt': 'art',
+            'artt': 'art',
+            'aart': 'art',
+            'panting': 'painting',
+            'drawin': 'drawing',
+            'draing': 'drawing',
+            'scketch': 'sketch',
+            'ilustration': 'illustration',
+            
+            // Programming related
+            'programing': 'programming',
+            'programmig': 'programming',
+            'progamming': 'programming',
+            'sofware': 'software',
+            'develper': 'developer',
+            'algoritm': 'algorithm',
+            'databse': 'database',
+            'javscript': 'javascript',
+            'pyton': 'python',
+            
+            // Data related
+            'dataa': 'data',
+            'databaze': 'database',
+            'data-base': 'database',
+            'data base': 'database',
+            
+            // Business related
+            'bussiness': 'business',
+            'buisness': 'business',
+            'managment': 'management',
+            'finace': 'finance',
+            'marketting': 'marketing',
+            
+            // General
+            'intelijence': 'intelligence',
+            'knowlege': 'knowledge',
+            'fotball': 'football',
+            'baskeball': 'basketball',
+            'eduction': 'education',
+            'teching': 'teaching'
+        };
+        
+        const words = query.toLowerCase().split(' ');
+        const correctedWords = words.map(word => {
+            // Check for exact misspelling
+            if (misspellings[word]) {
+                return misspellings[word];
+            }
+            
+            // Check for close matches using Levenshtein distance
+            for (const [correct, variations] of Object.entries({
+                'art': ['arys', 'arrt', 'artt', 'aart'],
+                'data': ['dataa', 'date', 'datta'],
+                'programming': ['programing', 'programmig', 'progamming'],
+                'database': ['databse', 'databaze', 'data-base'],
+                'business': ['bussiness', 'buisness', 'busness']
+            })) {
+                if (variations.includes(word)) {
+                    return correct;
+                }
+                
+                // Check similarity
+                if (word.length > 2 && levenshteinDistance(word, correct) <= 2) {
+                    return correct;
+                }
+            }
+            
+            return word;
+        });
+        
+        const correctedQuery = correctedWords.join(' ');
+        return correctedQuery !== query ? correctedQuery : query;
+    }
+    
+    function levenshteinDistance(a, b) {
+        if (a.length === 0) return b.length;
+        if (b.length === 0) return a.length;
+        
+        const matrix = [];
+        for (let i = 0; i <= b.length; i++) {
+            matrix[i] = [i];
+        }
+        for (let j = 0; j <= a.length; j++) {
+            matrix[0][j] = j;
+        }
+        
+        for (let i = 1; i <= b.length; i++) {
+            for (let j = 1; j <= a.length; j++) {
+                if (b.charAt(i - 1) === a.charAt(j - 1)) {
+                    matrix[i][j] = matrix[i - 1][j - 1];
+                } else {
+                    matrix[i][j] = Math.min(
+                        matrix[i - 1][j - 1] + 1,
+                        matrix[i][j - 1] + 1,
+                        matrix[i - 1][j] + 1
+                    );
+                }
+            }
+        }
+        
+        return matrix[b.length][a.length];
+    }
+
+    function showSpellingCorrection(original, corrected) {
+        const correctionContainer = document.getElementById('spellingCorrection');
+        if (correctionContainer) {
+            correctionContainer.innerHTML = `
+                <div class="spelling-correction-card">
+                    <span class="correction-icon">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 2a10 10 0 1 0 10 10"/>
+                            <path d="m9 12 2 2 4-4"/>
+                        </svg>
+                    </span>
+                    <span class="correction-text">
+                        Showing results for "<strong>${escapeHtml(corrected)}</strong>"
+                        <span class="original-query">Search instead for "${escapeHtml(original)}"</span>
+                    </span>
+                    <button class="correction-close" onclick="hideSpellingCorrection()">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M18 6 6 18"/>
+                            <path d="m6 6 12 12"/>
+                        </svg>
+                    </button>
+                </div>
+            `;
+            correctionContainer.style.display = 'block';
+        }
+    }
+    
+    function hideSpellingCorrection() {
+        const correctionContainer = document.getElementById('spellingCorrection');
+        if (correctionContainer) {
+            correctionContainer.style.display = 'none';
+        }
+    }
+
+    function updateAIInsights(insights) {
+        const aiInsightsEl = document.getElementById('aiInsights');
+        const aiStatEl = document.querySelector('.ai-stat');
+        
+        if (aiInsightsEl) {
+            let insightText = '';
+            if (insights.total_matches) {
+                insightText = insights.total_matches + ' matches';
+                if (insights.corrected_spelling) {
+                    insightText += ' (spelling corrected)';
+                }
+                if (insights.semantic_matches) {
+                    insightText += ' (semantic)';
+                }
+            }
+            aiInsightsEl.textContent = insightText;
+            aiStatEl.style.display = 'flex';
+            
+            // Hide after 10 seconds
+            setTimeout(() => {
+                aiStatEl.style.display = 'none';
+            }, 10000);
+        }
+    }
+
+    function showAISuggestions(query) {
+        const suggestionsContainer = document.getElementById('aiSuggestions');
+        if (!suggestionsContainer || query.length < 2) {
+            suggestionsContainer.style.display = 'none';
+            return;
+        }
+
+        // Generate intelligent suggestions based on query
+        const suggestions = generateAISuggestions(query);
+        
+        if (suggestions.length > 0) {
+            suggestionsContainer.innerHTML = suggestions.map(suggestion => `
+                <div class="ai-suggestion-item" onclick="applyAISuggestion('${escapeHtml(suggestion)}')">
+                    <span class="ai-suggestion-icon">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="m19 12-7-7-7 7"/>
+                            <path d="M5 5v14"/>
+                        </svg>
+                    </span>
+                    <span class="ai-suggestion-text">${escapeHtml(suggestion)}</span>
+                </div>
+            `).join('');
+            suggestionsContainer.style.display = 'block';
+        } else {
+            suggestionsContainer.style.display = 'none';
+        }
+    }
+
+    function generateAISuggestions(query) {
+        const queryLower = query.toLowerCase();
+        const suggestions = [];
+        
+        // Add spelling suggestions first
+        const spellingSuggestions = getSpellingSuggestions(query);
+        if (spellingSuggestions.length > 0) {
+            suggestions.push(...spellingSuggestions);
+        }
+        
+        // Common search patterns
+        const patterns = {
+            'programming': ['programming books', 'coding guides', 'software development', 'web development'],
+            'art': ['art books', 'painting guides', 'drawing tutorials', 'creative arts'],
+            'business': ['business management', 'finance books', 'marketing strategy', 'entrepreneurship'],
+            'data': ['database guides', 'SQL books', 'data analysis', 'big data'],
+            'database': ['SQL guides', 'database management', 'data storage', 'MySQL books'],
+            'learn': ['learning guides', 'tutorial books', 'beginner guides', 'how-to books'],
+            'advanced': ['expert guides', 'advanced topics', 'professional books', 'master level']
+        };
+        
+        // Check for pattern matches
+        for (const [pattern, suggestionList] of Object.entries(patterns)) {
+            if (queryLower.includes(pattern)) {
+                suggestions.push(...suggestionList);
+            }
+        }
+        
+        // Add generic suggestions if none found
+        if (suggestions.length === 0 && query.length > 2) {
+            suggestions.push(
+                `Search for "${query}" in titles`,
+                `Find books by author containing "${query}"`,
+                `Browse ${query} category`,
+                `Available ${query} books`
+            );
+        }
+        
+        return suggestions.slice(0, 6); // Limit to 6 suggestions
+    }
+    
+    function getSpellingSuggestions(query) {
+        const suggestions = [];
+        const queryLower = query.toLowerCase();
+        
+        // Common misspellings and corrections
+        const commonCorrections = {
+            'arys': 'arts',
+            'programing': 'programming',
+            'databse': 'database',
+            'bussiness': 'business',
+            'managment': 'management',
+            'sofware': 'software',
+            'teching': 'teaching',
+            'eduction': 'education',
+            'intelijence': 'intelligence'
+        };
+        
+        // Check if query matches any common misspellings
+        for (const [misspelling, correction] of Object.entries(commonCorrections)) {
+            if (queryLower === misspelling) {
+                suggestions.push(`${correction}`);
+            }
+        }
+        
+        // Check for close matches
+        if (suggestions.length === 0) {
+            for (const correction of Object.values(commonCorrections)) {
+                if (levenshteinDistance(queryLower, correction) <= 2 && queryLower !== correction) {
+                    suggestions.push(`${correction}`);
+                    break;
+                }
+            }
+        }
+        
+        return suggestions;
+    }
+
+    function applyAISuggestion(suggestion) {
+        document.getElementById('bookSearch').value = suggestion;
+        document.getElementById('aiSuggestions').style.display = 'none';
+        document.getElementById('spellingCorrection').style.display = 'none';
+        currentPage = 1;
+        updateDisplay();
+    }
 
     async function loadBooks() {
         try {
@@ -1034,8 +1661,8 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
         document.getElementById('availableBooks').textContent = availableBooks;
     }
 
-    function updateDisplay() {
-        const searchTerm = document.getElementById('bookSearch').value.trim().toLowerCase();
+    async function updateDisplay() {
+        const searchTerm = document.getElementById('bookSearch').value.trim();
         const categoryId = document.getElementById('categoryFilter').value;
         const sortFilter = document.getElementById('sortFilter').value;
         
@@ -1050,12 +1677,22 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
         // Apply search filter
         if (searchTerm) {
             filtered = filtered.filter(b => 
-                (b.title || '').toLowerCase().includes(searchTerm) ||
-                (b.author || '').toLowerCase().includes(searchTerm) ||
-                (b.isbn || '').toLowerCase().includes(searchTerm) ||
-                (b.publisher || '').toLowerCase().includes(searchTerm) ||
-                (b.category || '').toLowerCase().includes(searchTerm)
+                (b.title || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+                (b.author || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+                (b.isbn || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+                (b.publisher || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+                (b.category || '').toLowerCase().includes(searchTerm.toLowerCase())
             );
+        }
+        
+        // Apply AI-powered search if enabled and query has changed
+        if (aiSearchEnabled && searchTerm && searchTerm !== lastSearchQuery) {
+            lastSearchQuery = searchTerm;
+            filtered = await performAISearch(searchTerm, filtered);
+        } else if (!searchTerm) {
+            // Reset spelling correction when search is cleared
+            hideSpellingCorrection();
+            isMisspellingCorrected = false;
         }
         
         // Apply sorting
@@ -1077,6 +1714,11 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
         
         // Render pagination
         renderPagination(filtered.length);
+        
+        // Show AI suggestions
+        if (aiSearchEnabled && searchTerm) {
+            showAISuggestions(searchTerm);
+        }
     }
 
     function sortBooks(books, sortBy) {
@@ -1102,6 +1744,9 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
                     const totalB = b.total_copies || b.total_copies_cache || 0;
                     return totalB - totalA;
                 });
+                break;
+            case 'relevance':
+                // Already sorted by AI relevance
                 break;
         }
         
@@ -1352,20 +1997,45 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
     function resetFilters() {
         document.getElementById('bookSearch').value = '';
         document.getElementById('categoryFilter').value = 'all';
-        document.getElementById('sortFilter').value = 'newest';
+        document.getElementById('sortFilter').value = 'relevance';
         currentPage = 1;
+        lastSearchQuery = '';
+        hideSpellingCorrection();
+        isMisspellingCorrected = false;
         updateDisplay();
     }
 
     // Event Listeners
     document.getElementById('btnBookSearch').addEventListener('click', updateDisplay);
-    document.getElementById('bookSearch').addEventListener('keyup', (e) => {
-        if (e.key === 'Enter') updateDisplay();
+    
+    document.getElementById('bookSearch').addEventListener('input', (e) => {
+        // Clear previous timeout
+        if (searchTimeout) {
+            clearTimeout(searchTimeout);
+        }
+        
+        // Set new timeout for debounced search
+        searchTimeout = setTimeout(() => {
+            currentPage = 1;
+            updateDisplay();
+        }, 300);
     });
+    
+    document.getElementById('bookSearch').addEventListener('keyup', (e) => {
+        if (e.key === 'Enter') {
+            if (searchTimeout) {
+                clearTimeout(searchTimeout);
+            }
+            currentPage = 1;
+            updateDisplay();
+        }
+    });
+    
     document.getElementById('categoryFilter').addEventListener('change', () => {
         currentPage = 1;
         updateDisplay();
     });
+    
     document.getElementById('sortFilter').addEventListener('change', updateDisplay);
 
     // View toggle
@@ -1376,6 +2046,18 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
             currentView = this.dataset.view;
             updateDisplay();
         });
+    });
+
+    // Close AI suggestions when clicking outside
+    document.addEventListener('click', (e) => {
+        const suggestions = document.getElementById('aiSuggestions');
+        const searchBox = document.getElementById('searchBox');
+        
+        if (suggestions && searchBox && 
+            !suggestions.contains(e.target) && 
+            !searchBox.contains(e.target)) {
+            suggestions.style.display = 'none';
+        }
     });
 
     // Load books on page load
@@ -1461,7 +2143,126 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
     border-color: #fde68a;
 }
 
-/* Rest of your CSS remains the same... */
+/* AI Suggestions Styles */
+.ai-suggestions {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 0.5rem;
+    margin-top: 8px;
+    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1);
+    z-index: 1000;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.ai-suggestion-item {
+    padding: 12px 16px;
+    cursor: pointer;
+    border-bottom: 1px solid #f3f4f6;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    transition: background-color 0.2s;
+}
+
+.ai-suggestion-item:hover {
+    background-color: #f9fafb;
+}
+
+.ai-suggestion-item:last-child {
+    border-bottom: none;
+}
+
+.ai-suggestion-icon {
+    color: #6b7280;
+    flex-shrink: 0;
+}
+
+.ai-suggestion-text {
+    color: #374151;
+    font-size: 0.9rem;
+}
+
+/* Spelling Correction Styles */
+.spelling-correction {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: #fef3c7;
+    border: 1px solid #fde68a;
+    border-radius: 0.5rem;
+    margin-top: 8px;
+    z-index: 999;
+}
+
+.spelling-correction-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+}
+
+.correction-icon {
+    color: #d97706;
+    flex-shrink: 0;
+}
+
+.correction-text {
+    flex: 1;
+    font-size: 0.9rem;
+    color: #92400e;
+}
+
+.original-query {
+    display: block;
+    font-size: 0.8rem;
+    color: #b45309;
+    margin-top: 4px;
+    cursor: pointer;
+    text-decoration: underline;
+}
+
+.original-query:hover {
+    color: #92400e;
+}
+
+.correction-close {
+    background: none;
+    border: none;
+    color: #92400e;
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+    transition: background-color 0.2s;
+}
+
+.correction-close:hover {
+    background: rgba(146, 64, 14, 0.1);
+}
+
+/* AI Search Indicator */
+.ai-search-indicator {
+    animation: fadeIn 0.5s ease;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+.ai-icon {
+    animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+}
 
 /* Add new CSS for quick request form */
 .quick-request-form {
@@ -2503,6 +3304,7 @@ $book_id = isset($_GET['book_id']) ? intval($_GET['book_id']) : 0;
 
 .search-section {
     margin-bottom: 24px;
+    position: relative;
 }
 
 .search-box {

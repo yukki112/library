@@ -66,6 +66,45 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
         $stmt->execute([':id'=>$id]);
         json_response(['ok'=>true]);
     }
+} elseif ($_SERVER['REQUEST_METHOD'] === 'DELETE') {
+    $body = read_json_body();
+    
+    if (isset($_GET['action']) && $_GET['action'] === 'delete_all') {
+        // Delete all notifications for current user
+        if (in_array($role, ['admin','librarian','assistant'], true)) {
+            $stmt = $pdo->prepare("DELETE FROM notifications WHERE (role_target IN ('admin','librarian','assistant') OR role_target IS NULL)");
+            $stmt->execute();
+        } else {
+            $stmt = $pdo->prepare('DELETE FROM notifications WHERE (user_id = :uid OR role_target = :role)');
+            $stmt->execute([':uid'=>$u['id'], ':role'=>$role]);
+        }
+        json_response(['success' => true, 'message' => 'All notifications deleted']);
+    } elseif (isset($body['id'])) {
+        // Delete single notification
+        $id = (int)$body['id'];
+        
+        // Check if notification belongs to user
+        if (in_array($role, ['admin','librarian','assistant'], true)) {
+            $stmt = $pdo->prepare("SELECT id FROM notifications WHERE id = :id AND (role_target IN ('admin','librarian','assistant') OR role_target IS NULL)");
+            $stmt->execute([':id' => $id]);
+        } else {
+            $stmt = $pdo->prepare('SELECT id FROM notifications WHERE id = :id AND (user_id = :uid OR role_target = :role)');
+            $stmt->execute([':id' => $id, ':uid' => $u['id'], ':role' => $role]);
+        }
+        
+        $notification = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if (!$notification) {
+            json_response(['error' => 'Notification not found or access denied'], 404);
+        }
+        
+        $deleteStmt = $pdo->prepare('DELETE FROM notifications WHERE id = :id');
+        $deleteStmt->execute([':id' => $id]);
+        
+        json_response(['success' => true, 'message' => 'Notification deleted']);
+    } else {
+        json_response(['error' => 'Notification ID required'], 400);
+    }
 }
 
 json_response(['error' => 'Method not allowed'], 405);

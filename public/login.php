@@ -225,7 +225,6 @@ if (is_logged_in()) {
                     return;
                 }
                 
-                // If login failed, try to sync student account
                 await syncAndLoginStudent(username, password, remember);
                 
             } catch (error) {
@@ -234,7 +233,7 @@ if (is_logged_in()) {
         }
         
         async function syncAndLoginStudent(username, password, remember) {
-            // Get student data from HR API
+        
             let studentData = null;
             
             try {
@@ -253,7 +252,7 @@ if (is_logged_in()) {
                 throw new Error('Student ID not found. Please check your ID or contact administration.');
             }
             
-            // Sync student account
+       
             const syncResponse = await fetch('../api/auth.php?action=sync_student', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -269,7 +268,7 @@ if (is_logged_in()) {
                 throw new Error(syncData.error || 'Failed to sync student account');
             }
             
-            // Now try login again
+           
             const retryResponse = await fetch('../api/auth.php?action=login', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },

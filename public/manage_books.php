@@ -23,12 +23,14 @@ $current_page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
 $books_per_page = 6;
 $offset = ($current_page - 1) * $books_per_page;
 
-// Get summary statistics FIRST
+// Get summary statistics FIRST - including price statistics
 $stats_query = "SELECT 
     COUNT(DISTINCT b.id) as total_titles,
     COUNT(bc.id) as total_copies,
     SUM(CASE WHEN bc.status = 'available' THEN 1 ELSE 0 END) as available_copies,
-    COUNT(DISTINCT b.category) as total_categories
+    COUNT(DISTINCT b.category) as total_categories,
+    SUM(b.price) as total_inventory_value,
+    AVG(b.price) as average_book_price
     FROM books b
     LEFT JOIN book_copies bc ON b.id = bc.book_id
     WHERE b.is_active = 1";
@@ -63,7 +65,7 @@ $count_stmt->execute($count_params);
 $total_books = $count_stmt->fetchColumn();
 $total_pages = ceil($total_books / $books_per_page);
 
-// Build query with filters for paginated results
+// Build query with filters for paginated results - include price
 $query = "SELECT b.*, 
                  COUNT(DISTINCT bc.id) as total_copies,
                  SUM(CASE WHEN bc.status = 'available' THEN 1 ELSE 0 END) as available_copies
@@ -128,7 +130,7 @@ include __DIR__ . '/_header.php';
     <p class="subtitle">Manage the library catalogue, add new books, and update existing records</p>
 </div>
 
-<!-- Summary Stats at the Top -->
+<!-- Summary Stats at the Top - Updated with price stats -->
 <div class="summary-stats">
     <div class="stat-item">
         <i class="fa fa-book"></i>
@@ -152,10 +154,10 @@ include __DIR__ . '/_header.php';
         </div>
     </div>
     <div class="stat-item">
-        <i class="fa fa-tags"></i>
+        <i class="fa fa-money"></i>
         <div>
-            <h4><?= $stats['total_categories'] ?? 0 ?></h4>
-            <span>Categories</span>
+            <h4>₱<?= number_format($stats['total_inventory_value'] ?? 0, 2) ?></h4>
+            <span>Inventory Value</span>
         </div>
     </div>
 </div>
@@ -285,6 +287,7 @@ include __DIR__ . '/_header.php';
                             <th>ISBN</th>
                             <th>Category</th>
                             <th>Year</th>
+                            <th>Price</th>
                             <th class="text-center">
                                 <i class="fa fa-copy" title="Total Copies"></i>
                             </th>
@@ -308,6 +311,10 @@ include __DIR__ . '/_header.php';
                             // Check for cover image
                             $cover_image = $book['cover_image_cache'] ?? $book['cover_image'] ?? null;
                             $cover_url = $cover_image ? '../uploads/covers/' . htmlspecialchars($cover_image) : '../assets/images/default-book-cover.jpg';
+                            
+                            // Format price
+                            $price = $book['price'] ?? 0;
+                            $formatted_price = $price > 0 ? '₱' . number_format($price, 2) : '₱0.00';
                         ?>
                             <tr data-id="<?= (int)$book['id'] ?>"
                                 data-title="<?= htmlspecialchars($book['title'] ?? '') ?>"
@@ -317,6 +324,7 @@ include __DIR__ . '/_header.php';
                                 data-category="<?= htmlspecialchars($book['category'] ?? '') ?>"
                                 data-publisher="<?= htmlspecialchars($book['publisher'] ?? '') ?>"
                                 data-year="<?= (int)($book['year_published'] ?? 0) ?>"
+                                data-price="<?= $price ?>"
                                 data-description="<?= htmlspecialchars($book['description'] ?? '') ?>"
                                 data-cover-image="<?= htmlspecialchars($cover_image ?? '') ?>">
                                 <td class="text-center">
@@ -360,6 +368,9 @@ include __DIR__ . '/_header.php';
                                     <?php endif; ?>
                                 </td>
                                 <td><?= $book['year_published'] ?: '-' ?></td>
+                                <td>
+                                    <span class="price-badge"><?= $formatted_price ?></span>
+                                </td>
                                 <td class="text-center">
                                     <a href="#" onclick="showCopies(<?= $book['id'] ?>); return false;" title="View all copies">
                                         <span class="badge badge-outline"><?= $total_copies ?></span>
@@ -537,6 +548,21 @@ include __DIR__ . '/_header.php';
                         <input type="text" 
                                id="bookISBN" 
                                placeholder="Enter ISBN"
+                               class="form-control">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="bookPrice">
+                            <i class="fa fa-money"></i>
+                            Price (₱) *
+                        </label>
+                        <input type="number" 
+                               id="bookPrice" 
+                               step="0.01"
+                               min="0"
+                               value="0.00"
+                               required
+                               placeholder="0.00"
                                class="form-control">
                     </div>
                     
@@ -1083,6 +1109,18 @@ include __DIR__ . '/_header.php';
         font-size: 0.875rem;
     }
     
+    /* Price badge styling */
+    .price-badge {
+        display: inline-block;
+        padding: 0.25rem 0.5rem;
+        background: #f0f9ff;
+        color: #0369a1;
+        border-radius: 0.25rem;
+        font-size: 0.875rem;
+        font-weight: 600;
+        border: 1px solid #bae6fd;
+    }
+    
     /* Existing styles remain the same */
     .book-cover-container {
         width: 50px;
@@ -1423,6 +1461,10 @@ include __DIR__ . '/_header.php';
     .stat-item i {
         font-size: 1.5rem;
         color: #3b82f6;
+    }
+    
+    .stat-item i.fa-money {
+        color: #10b981;
     }
     
     .stat-item h4 {
@@ -2159,6 +2201,7 @@ function resetForm() {
     document.getElementById('bookId').value = '';
     document.getElementById('existingCoverImage').value = '';
     document.getElementById('bookCategoryCustom').value = '';
+    document.getElementById('bookPrice').value = '0.00';
     document.getElementById('initialCopies').value = '5';
     document.getElementById('copyNotes').value = '';
     document.getElementById('coverPreview').src = '../assets/images/default-book-cover.jpg';
@@ -2502,6 +2545,7 @@ async function showCopies(bookId) {
             <div class="book-header">
                 <h4>${escapeHtml(book.title)}</h4>
                 <p class="text-muted">by ${escapeHtml(book.author)}</p>
+                <p class="text-muted"><strong>Price:</strong> ₱${parseFloat(book.price || 0).toFixed(2)}</p>
             </div>
         `;
         
@@ -2636,7 +2680,7 @@ async function viewCopyDetails(copyId) {
                         ${copy.purchase_price ? `
                             <div class="copy-details-item">
                                 <label><i class="fa fa-money"></i> Purchase Price</label>
-                                <p>$${parseFloat(copy.purchase_price).toFixed(2)}</p>
+                                <p>₱${parseFloat(copy.purchase_price).toFixed(2)}</p>
                             </div>
                         ` : ''}
                     </div>
@@ -2732,7 +2776,7 @@ async function deleteCopy(copyId, copyNumber) {
     }
 }
 
-// View Book Details with cover image
+// View Book Details with cover image and price
 async function viewBook(id) {
     try {
         const response = await fetch(`../api/dispatch.php?resource=books&id=${id}`);
@@ -2743,6 +2787,10 @@ async function viewBook(id) {
         // Check for cover image
         const cover_image = book.cover_image_cache || book.cover_image || null;
         const cover_url = cover_image ? '../uploads/covers/' + escapeHtml(cover_image) : '../assets/images/default-book-cover.jpg';
+        
+        // Format price
+        const price = book.price || 0;
+        const formatted_price = price > 0 ? '₱' + parseFloat(price).toFixed(2) : '₱0.00';
         
         // Create HTML content
         const html = `
@@ -2759,6 +2807,10 @@ async function viewBook(id) {
                             <div class="book-details-meta-item">
                                 <i class="fa fa-user"></i>
                                 <span>${escapeHtml(book.author)}</span>
+                            </div>
+                            <div class="book-details-meta-item">
+                                <i class="fa fa-money"></i>
+                                <span class="price-badge">${formatted_price}</span>
                             </div>
                             ${book.year_published ? `
                                 <div class="book-details-meta-item">
@@ -2872,6 +2924,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 document.getElementById('bookTitle').value = book.title || '';
                 document.getElementById('bookAuthor').value = book.author || '';
                 document.getElementById('bookISBN').value = book.isbn || '';
+                document.getElementById('bookPrice').value = book.price || '0.00';
                 document.getElementById('bookCategory').value = book.category_id || '';
                 document.getElementById('bookCategoryCustom').value = book.category || '';
                 document.getElementById('bookPublisher').value = book.publisher || '';
@@ -2946,6 +2999,7 @@ document.addEventListener('DOMContentLoaded', function() {
         bookData.append('title', document.getElementById('bookTitle').value.trim());
         bookData.append('author', document.getElementById('bookAuthor').value.trim());
         bookData.append('isbn', document.getElementById('bookISBN').value.trim() || '');
+        bookData.append('price', document.getElementById('bookPrice').value || '0.00');
         bookData.append('publisher', document.getElementById('bookPublisher').value.trim() || '');
         bookData.append('year_published', document.getElementById('bookYear').value || '');
         bookData.append('description', document.getElementById('bookDescription').value.trim() || '');
